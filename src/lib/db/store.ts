@@ -277,10 +277,10 @@ export function defaultTemplates(businessId: string): LocalTemplate[] {
 
 export function envWhatsAppDefaults() {
   return {
-    phone_number_id: process.env.WHATSAPP_PHONE_NUMBER_ID || "1393528417176961",
-    waba_id: process.env.WHATSAPP_WABA_ID || "4634842436739237",
+    phone_number_id: process.env.WHATSAPP_PHONE_NUMBER_ID || null,
+    waba_id: process.env.WHATSAPP_WABA_ID || null,
     access_token: process.env.WHATSAPP_ACCESS_TOKEN || null,
-    verify_token: process.env.WHATSAPP_VERIFY_TOKEN || "my_whatsapp_verify_token_123",
+    verify_token: process.env.WHATSAPP_VERIFY_TOKEN || null,
   };
 }
 
