@@ -6,11 +6,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { createClient } from "@/lib/supabase/client";
 
 export default function NewOrderPage() {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
   const [form, setForm] = useState({
     customerName: "",
     customerPhone: "",
@@ -30,64 +30,18 @@ export default function NewOrderPage() {
   async function createOrder(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
-    const supabase = createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return;
-
-    const { data: member } = await supabase
-      .from("business_members")
-      .select("business_id")
-      .eq("user_id", user.id)
-      .single();
-
-    if (!member) return;
-
-    const { data: customer } = await supabase
-      .from("customers")
-      .upsert(
-        { business_id: member.business_id, name: form.customerName, phone: form.customerPhone, address: form.address },
-        { onConflict: "business_id,phone" }
-      )
-      .select()
-      .single();
-
-    if (!customer) { setLoading(false); return; }
-
-    const { count } = await supabase
-      .from("orders")
-      .select("*", { count: "exact", head: true })
-      .eq("business_id", member.business_id);
-
-    const orderNumber = `ORD-${String((count ?? 0) + 1).padStart(5, "0")}`;
-    const total = parseFloat(form.total) || parseFloat(form.unitPrice) * parseInt(form.quantity);
-
-    const { data: order } = await supabase
-      .from("orders")
-      .insert({
-        business_id: member.business_id,
-        order_number: orderNumber,
-        customer_id: customer.id,
-        subtotal: total,
-        total,
-        payment_method: form.paymentMethod,
-        payment_status: "unpaid",
-        order_status: "pending",
-        delivery_address: form.address,
-        customer_note: form.notes,
-        source: "manual",
-      })
-      .select()
-      .single();
-
-    if (order && form.productName) {
-      await supabase.from("order_items").insert({
-        order_id: order.id,
-        product_name: form.productName,
-        quantity: parseInt(form.quantity),
-        unit_price: parseFloat(form.unitPrice) || total,
-      });
+    setError("");
+    const res = await fetch("/api/orders", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(form),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setError(data.error || "Could not create order");
+      setLoading(false);
+      return;
     }
-
     router.push("/orders");
     router.refresh();
   }
@@ -147,6 +101,7 @@ export default function NewOrderPage() {
               <Label>Notes</Label>
               <Input value={form.notes} onChange={(e) => update("notes", e.target.value)} className="mt-1" />
             </div>
+            {error && <p className="text-sm text-red-600">{error}</p>}
             <Button type="submit" disabled={loading} className="w-full">
               {loading ? "Creating..." : "Create Order"}
             </Button>

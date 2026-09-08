@@ -4,6 +4,7 @@ export type OrderStatus =
   | "draft"
   | "pending"
   | "confirmed"
+  | "processing"
   | "preparing"
   | "ready"
   | "out_for_delivery"
@@ -178,4 +179,5 @@ export interface AgentResponse {
   order_id: string | null;
   confidence: number;
   needs_human: boolean;
+  send_images?: Array<{ path: string; caption: string; productName?: string }>;
 }

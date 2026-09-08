@@ -1,31 +1,23 @@
 import { requireBusiness } from "@/lib/auth/business";
-import { createClient } from "@/lib/supabase/server";
+import { readDb } from "@/lib/db/store";
 import { Card, CardContent } from "@/components/ui/card";
 import { formatCurrency } from "@/lib/utils";
-import type { Customer } from "@/types/database";
 
 export default async function CustomersPage() {
   const { businessId, business } = await requireBusiness();
-  const supabase = await createClient();
-
-  const { data: customers } = await supabase
-    .from("customers")
-    .select("*")
-    .eq("business_id", businessId)
-    .order("created_at", { ascending: false });
+  const customers = (await readDb())
+    .customers.filter((c) => c.business_id === businessId)
+    .sort((a, b) => b.created_at.localeCompare(a.created_at));
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900">Customers</h1>
-          <p className="text-sm text-gray-500">WhatsApp se auto-added customers</p>
-        </div>
+      <div>
+        <h1 className="text-2xl font-bold text-gray-900">Customers</h1>
+        <p className="text-sm text-gray-500">WhatsApp se auto-added customers</p>
       </div>
-
       <Card>
         <CardContent className="p-0">
-          {!customers?.length ? (
+          {!customers.length ? (
             <div className="py-16 text-center text-sm text-gray-500">
               Customers automatically add honge jab WhatsApp pe order aayega
             </div>
@@ -40,7 +32,7 @@ export default async function CustomersPage() {
                 </tr>
               </thead>
               <tbody>
-                {customers.map((c: Customer) => (
+                {customers.map((c) => (
                   <tr key={c.id} className="border-b hover:bg-gray-50">
                     <td className="px-6 py-4 font-medium">{c.name}</td>
                     <td className="px-6 py-4">{c.phone}</td>

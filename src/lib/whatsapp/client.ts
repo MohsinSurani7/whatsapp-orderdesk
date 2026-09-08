@@ -47,6 +47,41 @@ export async function sendWhatsAppText({
   return response.json();
 }
 
+export async function sendWhatsAppImage({
+  phoneNumberId,
+  accessToken,
+  to,
+  imageUrl,
+  caption,
+}: {
+  phoneNumberId: string;
+  accessToken: string;
+  to: string;
+  imageUrl: string;
+  caption?: string;
+}) {
+  const normalizedPhone = to.replace(/\D/g, "").replace(/^0/, "92");
+  const response = await fetch(`${WHATSAPP_API}/${phoneNumberId}/messages`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to: normalizedPhone,
+      type: "image",
+      image: { link: imageUrl, caption: caption || undefined },
+    }),
+  });
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`WhatsApp image send failed: ${error}`);
+  }
+  return response.json();
+}
+
 export async function markMessageAsRead(
   phoneNumberId: string,
   accessToken: string,

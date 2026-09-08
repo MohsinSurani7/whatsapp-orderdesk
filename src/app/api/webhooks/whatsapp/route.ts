@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { handleWhatsAppWebhook } from "@/lib/whatsapp/webhook-handler";
 
+export const maxDuration = 60;
+
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
   const mode = searchParams.get("hub.mode");
@@ -9,11 +11,17 @@ export async function GET(request: NextRequest) {
 
   const verifyToken = process.env.WHATSAPP_VERIFY_TOKEN;
 
-  if (mode === "subscribe" && token === verifyToken) {
-    return new NextResponse(challenge, { status: 200 });
+  if (mode === "subscribe" && token && token === verifyToken && challenge) {
+    return new NextResponse(challenge, {
+      status: 200,
+      headers: { "Content-Type": "text/plain; charset=utf-8" },
+    });
   }
 
-  return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  return new NextResponse("Forbidden", {
+    status: 403,
+    headers: { "Content-Type": "text/plain; charset=utf-8" },
+  });
 }
 
 export async function POST(request: NextRequest) {

@@ -1,21 +1,14 @@
 import { requireBusiness } from "@/lib/auth/business";
-import { createClient } from "@/lib/supabase/server";
+import { readDb } from "@/lib/db/store";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 export default async function SettingsPage() {
   const { business, businessId } = await requireBusiness();
-  const supabase = await createClient();
-
-  const { data: subscription } = await supabase
-    .from("subscriptions")
-    .select("*")
-    .eq("business_id", businessId)
-    .single();
+  const subscription = (await readDb()).subscriptions.find((s) => s.business_id === businessId);
 
   return (
     <div className="mx-auto max-w-2xl space-y-6">
       <h1 className="text-2xl font-bold text-gray-900">Settings</h1>
-
       <Card>
         <CardHeader><CardTitle>Business</CardTitle></CardHeader>
         <CardContent className="space-y-2 text-sm">
@@ -24,7 +17,6 @@ export default async function SettingsPage() {
           <p><span className="text-gray-500">WhatsApp:</span> {business.whatsapp_number ?? "Not set"}</p>
         </CardContent>
       </Card>
-
       <Card>
         <CardHeader><CardTitle>Subscription</CardTitle></CardHeader>
         <CardContent className="space-y-2 text-sm">

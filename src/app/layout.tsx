@@ -13,6 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
+  metadataBase: new URL(process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000"),
   title: "WhatsApp OrderDesk — Turn WhatsApp Orders Into an Organized Business",
   description: "AI-powered WhatsApp automation for small businesses. Automatically manage orders, customers, and deliveries inside WhatsApp chats.",
   openGraph: {

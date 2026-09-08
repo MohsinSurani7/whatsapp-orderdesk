@@ -17,11 +17,10 @@ This is **WhatsApp automation** — not just a dashboard with copy-paste:
 
 ## Stack
 
-- **Frontend:** Next.js 16 + TypeScript + Tailwind CSS
-- **Backend:** Supabase (PostgreSQL + Auth + RLS)
-- **AI:** OpenAI (provider abstraction, fallback parser included)
+- **Backend:** Supabase (PostgreSQL + Auth + Storage)
+- **AI:** Local rule-based agent (optional Groq/OpenAI)
 - **WhatsApp:** Meta Cloud API (webhook + send messages)
-- **Deploy:** Vercel-compatible
+- **Deploy:** Netlify + Supabase
 
 ## Quick Start
 
@@ -29,23 +28,66 @@ This is **WhatsApp automation** — not just a dashboard with copy-paste:
 cd whatsapp-orderdesk
 npm install
 cp .env.example .env.local
-# Fill in Supabase + AI + WhatsApp credentials
 npm run dev
 ```
 
-## Database Setup
+Without real Supabase keys the app uses `data/db.json` on your PC.
 
-1. Create a Supabase project
-2. Run migration: `supabase/migrations/001_initial_schema.sql`
-3. Add env vars to `.env.local`
+## Database Setup (Supabase)
+
+1. Create a project at [supabase.com](https://supabase.com)
+2. SQL Editor mein ye dono files run karo:
+   - `supabase/migrations/001_initial_schema.sql`
+   - `supabase/migrations/002_netlify_fields.sql`
+3. Authentication → Providers: Email on. Confirm email **off** rakho (warna signup wait karega).
+4. Project Settings → API se URL, `anon` key, `service_role` key copy karo (service_role secret hai).
+
+## Netlify deploy (stable `*.netlify.app` URL)
+
+1. GitHub pe repo push karo, Netlify pe **Import project**.
+2. Build: `npm run build`, plugin: `@netlify/plugin-nextjs` (`netlify.toml` already hai).
+3. Site name set karo, e.g. `whatsapp-orderdesk` → `https://whatsapp-orderdesk.netlify.app`
+4. Environment variables Netlify pe wohi `.env.example` wali values.
+   `NEXT_PUBLIC_APP_URL` = `https://your-site.netlify.app`
+5. Deploy. Meta webhook:
+
+`https://your-site.netlify.app/api/webhooks/whatsapp`
+
+Verify token = `WHATSAPP_VERIFY_TOKEN`.
+
+Yeh URL tunnel ki tarah har restart pe change **nahi** hota.
 
 ## WhatsApp Setup
 
-1. Create a Meta Developer app with WhatsApp product
-2. Get Phone Number ID, WABA ID, and permanent access token
-3. Set webhook URL: `https://your-domain.com/api/webhooks/whatsapp`
-4. Use verify token from `.env.local` (`WHATSAPP_VERIFY_TOKEN`)
-5. Enter credentials in Dashboard → WhatsApp Agent
+1. Meta Developer app + WhatsApp product
+2. Phone Number ID, WABA ID, permanent token
+3. Webhook URL upar wala Netlify URL
+4. Testers add karo jab tak app unpublished ho
+
+## Free tier: 100 WhatsApp orders / day
+
+**Haan, comfortably chal jana chahiye.**
+
+~100 orders/day ≈ 3,000/month. Har order kuch rows (customer, messages, order, items) — database size MB se bhi kam.
+
+Supabase Free roughly:
+- Unlimited API requests
+- 500 MB database
+- 1 GB file storage (product photos)
+- 50,000 monthly active users (dashboard logins, WhatsApp customers Auth MAU nahi ginayenge jab tak unka signup nahi)
+- 5 GB egress
+
+Netlify Free: site + serverless. 100 orders/day webhook calls easily under monthly invocation limits.
+
+**Dhyan:**
+- Free Supabase project **7 din inactive** ho to pause ho sakta hai — daily orders se pause nahi hona chahiye.
+- Bohot saari high-res photos Storage 1 GB fill kar sakti hain.
+- Netlify function timeout chhota hota hai; ek message pe 10 photos bhejna kabhi kabhi cut ho sakta hai.
+- Production uptime/backups ke liye baad mein Supabase Pro (~$25) better hai, lekin 100 orders/day ke volume ke liye Free **kaafi** hai.
+
+## Local tunnel (sirf PC pe test)
+
+`npm run tunnel` — random `trycloudflare.com` URL. Production ke liye Netlify use karo.
 
 ## Project Structure
 

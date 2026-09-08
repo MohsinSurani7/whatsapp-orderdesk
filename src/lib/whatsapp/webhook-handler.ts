@@ -1,313 +1,369 @@
-import { createAdminClient } from "@/lib/supabase/admin";
 import { processAgentMessage } from "@/lib/ai/agent";
-import { sendWhatsAppText, markMessageAsRead } from "@/lib/whatsapp/client";
-import type { ParsedOrderData, WhatsAppConfig, Business } from "@/types/database";
+import { sendWhatsAppText, sendWhatsAppImage, markMessageAsRead } from "@/lib/whatsapp/client";
+import {
+  nowIso,
+  readDb,
+  resolveWhatsAppConfig,
+  uid,
+  writeDb,
+  type LocalConversation,
+} from "@/lib/db/store";
+import type { ParsedOrderData } from "@/types/database";
 
 interface WebhookMessage {
   from: string;
   id: string;
-  timestamp: string;
   type: string;
   text?: { body: string };
+  context?: { id?: string; from?: string };
+  image?: { caption?: string; id?: string };
 }
 
 interface WebhookEntry {
-  id: string;
   changes: Array<{
     value: {
-      messaging_product: string;
-      metadata: { display_phone_number: string; phone_number_id: string };
+      metadata: { phone_number_id: string };
       contacts?: Array<{ profile: { name: string }; wa_id: string }>;
       messages?: WebhookMessage[];
+      statuses?: unknown[];
     };
     field: string;
   }>;
 }
 
 export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
-  const supabase = createAdminClient();
-
   for (const entry of body.entry ?? []) {
     for (const change of entry.changes) {
       if (change.field !== "messages") continue;
-
       const { metadata, messages, contacts } = change.value;
       if (!messages?.length) continue;
 
-      const phoneNumberId = metadata.phone_number_id;
+      const resolved = await resolveWhatsAppConfig(metadata.phone_number_id);
+      const { config, business } = resolved;
+      if (!config.agent_enabled || !business) continue;
 
-      const { data: config } = await supabase
-        .from("whatsapp_configs")
-        .select("*, businesses(*)")
-        .eq("phone_number_id", phoneNumberId)
-        .single();
-
-      if (!config || !config.agent_enabled) continue;
-
-      const business = config.businesses as unknown as Business;
-      const waConfig = config as WhatsAppConfig & { businesses: Business };
+      const accessToken = process.env.WHATSAPP_ACCESS_TOKEN || config.access_token;
+      const phoneNumberId = config.phone_number_id || metadata.phone_number_id;
+      if (!accessToken || !phoneNumberId) continue;
 
       for (const msg of messages) {
-        if (msg.type !== "text" || !msg.text?.body) continue;
+        const textBody =
+          msg.type === "text"
+            ? msg.text?.body
+            : msg.type === "image"
+              ? msg.image?.caption || ""
+              : "";
+        if (msg.type !== "text" && msg.type !== "image") continue;
+        if (msg.type === "text" && !textBody) continue;
 
-        await markMessageAsRead(phoneNumberId, waConfig.access_token!, msg.id);
+        const db = await readDb();
+        if (db.messages.some((m) => m.whatsapp_message_id === msg.id)) continue;
+
+        await markMessageAsRead(phoneNumberId, accessToken, msg.id).catch(() => undefined);
 
         const customerPhone = msg.from;
         const customerWaName = contacts?.[0]?.profile?.name ?? null;
-        const inboundText = msg.text.body;
-
-        const conversation = await getOrCreateConversation(
-          supabase,
-          waConfig.business_id,
-          customerPhone,
-          customerWaName
+        let conversation = db.conversations.find(
+          (c) => c.business_id === business.id && c.customer_phone === customerPhone
         );
+        if (!conversation) {
+          conversation = {
+            id: uid(),
+            business_id: business.id,
+            customer_phone: customerPhone,
+            customer_id: null,
+            customer_name: customerWaName,
+            status: "active",
+            pending_order_data: null,
+            last_message_at: nowIso(),
+            created_at: nowIso(),
+          };
+          db.conversations.push(conversation);
+        }
 
-        await supabase.from("whatsapp_messages").insert({
-          business_id: waConfig.business_id,
+        const inboundText =
+          textBody ||
+          (msg.context?.id ? "ye product chahiye" : "");
+        if (!inboundText) continue;
+
+        db.messages.push({
+          id: uid(),
+          business_id: business.id,
           conversation_id: conversation.id,
           direction: "inbound",
-          message_type: "text",
+          message_type: msg.type === "image" ? "image" : "text",
           content: inboundText,
           whatsapp_message_id: msg.id,
+          image_url: null,
+          created_at: nowIso(),
+        });
+        conversation.last_message_at = nowIso();
+        await writeDb(db);
+
+        const history = db.messages
+          .filter((m) => m.conversation_id === conversation!.id)
+          .slice(-20)
+          .map((m) => ({
+            role: (m.direction === "inbound" ? "user" : "assistant") as "user" | "assistant",
+            content: m.content,
+          }));
+
+        const products = db.products
+          .filter((p) => p.business_id === business.id && p.is_active)
+          .map((p) => ({
+            name: p.name,
+            price: p.price,
+            description: p.description || undefined,
+            image_url: p.image_url,
+          }));
+
+        const referredProduct = await resolveReferredProduct({
+          conversationId: conversation.id,
+          contextId: msg.context?.id,
+          text: inboundText,
+          products,
         });
 
-        const { data: history } = await supabase
-          .from("whatsapp_messages")
-          .select("direction, content")
-          .eq("conversation_id", conversation.id)
-          .order("created_at", { ascending: true })
-          .limit(20);
-
-        const conversationHistory = (history ?? []).map((m) => ({
-          role: (m.direction === "inbound" ? "user" : "assistant") as "user" | "assistant",
-          content: m.content,
-        }));
-
-        const { data: products } = await supabase
-          .from("products")
-          .select("name, price")
-          .eq("business_id", waConfig.business_id)
-          .eq("is_active", true)
-          .limit(50);
+        const bizOrders = db.orders.filter((o) => o.business_id === business.id);
+        const customerOrders = bizOrders.filter((o) => {
+          const c = db.customers.find((cu) => cu.id === o.customer_id);
+          return c?.phone === customerPhone || c?.whatsapp_id === customerPhone || o.whatsapp_conversation_id === conversation.id;
+        });
 
         const agentResponse = await processAgentMessage({
           message: inboundText,
-          conversationHistory,
+          conversationHistory: history,
           businessName: business.name,
-          agentName: waConfig.agent_name,
-          products: products ?? [],
+          agentName: config.agent_name,
+          products,
           pendingOrder: conversation.pending_order_data,
           customerName: conversation.customer_name,
+          instructions: config.agent_instructions || config.agent_greeting,
+          referredProduct,
+          orderStats: {
+            total: bizOrders.length,
+            delivered: bizOrders.filter((o) => o.order_status === "delivered").length,
+            pending: bizOrders.filter((o) => o.order_status === "pending" || o.order_status === "processing").length,
+            customerTotal: customerOrders.length,
+          },
         });
 
         let orderId: string | null = null;
-
         if (agentResponse.should_create_order && agentResponse.parsed_order) {
-          orderId = await createOrderFromAgent(
-            supabase,
-            waConfig.business_id,
-            conversation,
-            agentResponse.parsed_order,
-            customerPhone
-          );
+          orderId = await createOrderFromAgent(conversation, agentResponse.parsed_order, customerPhone, business.id);
         } else if (agentResponse.parsed_order) {
-          await supabase
-            .from("whatsapp_conversations")
-            .update({
-              pending_order_data: agentResponse.parsed_order,
-              status: "awaiting_confirmation",
-              last_message_at: new Date().toISOString(),
-            })
-            .eq("id", conversation.id);
-        }
-
-        if (agentResponse.needs_human) {
-          await supabase
-            .from("whatsapp_conversations")
-            .update({ status: "handed_off" })
-            .eq("id", conversation.id);
-
-          await supabase.from("notifications").insert({
-            business_id: waConfig.business_id,
-            title: "Human handoff needed",
-            message: `Customer ${customerPhone} needs human assistance.`,
-            type: "warning",
-          });
+          const latest = await readDb();
+          const conv = latest.conversations.find((c) => c.id === conversation!.id);
+          if (conv) {
+            conv.pending_order_data = agentResponse.parsed_order as unknown as Record<string, unknown>;
+            conv.status = "awaiting_confirmation";
+            conv.last_message_at = nowIso();
+            await writeDb(latest);
+          }
         }
 
         let replyText = agentResponse.reply;
         if (orderId) {
-          const { data: order } = await supabase
-            .from("orders")
-            .select("order_number, total")
-            .eq("id", orderId)
-            .single();
+          const latest = await readDb();
+          const order = latest.orders.find((o) => o.id === orderId);
           if (order) {
             replyText += `\n\nOrder #${order.order_number} create ho gaya. Total: Rs.${order.total}`;
           }
         }
 
-        if (waConfig.access_token && waConfig.phone_number_id) {
+        try {
           const sent = await sendWhatsAppText({
-            phoneNumberId: waConfig.phone_number_id,
-            accessToken: waConfig.access_token,
+            phoneNumberId,
+            accessToken,
             to: customerPhone,
             message: replyText,
           });
-
-          await supabase.from("whatsapp_messages").insert({
-            business_id: waConfig.business_id,
+          const latest = await readDb();
+          latest.messages.push({
+            id: uid(),
+            business_id: business.id,
             conversation_id: conversation.id,
             direction: "outbound",
             message_type: "text",
             content: replyText,
             whatsapp_message_id: sent?.messages?.[0]?.id ?? null,
+            image_url: null,
+            created_at: nowIso(),
           });
-        }
+          const conv = latest.conversations.find((c) => c.id === conversation!.id);
+          if (conv) conv.last_message_at = nowIso();
+          await writeDb(latest);
 
-        await supabase
-          .from("whatsapp_conversations")
-          .update({ last_message_at: new Date().toISOString() })
-          .eq("id", conversation.id);
+          const publicBase = (process.env.NEXT_PUBLIC_APP_URL || "").replace(/\/$/, "");
+          const images = agentResponse.send_images || [];
+          for (const img of images.slice(0, 10)) {
+            const absolute = img.path.startsWith("http") ? img.path : `${publicBase}${img.path}`;
+            if (!absolute.startsWith("https://")) continue;
+            try {
+              const imgSent = await sendWhatsAppImage({
+                phoneNumberId,
+                accessToken,
+                to: customerPhone,
+                imageUrl: absolute,
+                caption: img.caption,
+              });
+              const after = await readDb();
+              after.messages.push({
+                id: uid(),
+                business_id: business.id,
+                conversation_id: conversation.id,
+                direction: "outbound",
+                message_type: "image",
+                content: img.caption,
+                whatsapp_message_id: imgSent?.messages?.[0]?.id ?? null,
+                image_url: img.path,
+                product_name: img.productName || img.caption.split(" — ")[0] || null,
+                created_at: nowIso(),
+              });
+              await writeDb(after);
+            } catch (imgErr) {
+              console.error("WhatsApp image send failed:", imgErr);
+            }
+          }
+        } catch (error) {
+          console.error("WhatsApp send failed:", error);
+        }
       }
     }
   }
 }
 
-async function getOrCreateConversation(
-  supabase: ReturnType<typeof createAdminClient>,
-  businessId: string,
-  customerPhone: string,
-  customerName: string | null
+function productFromStoredMessage(
+  msg: { product_name?: string | null; content: string },
+  products: Array<{ name: string; price: number; description?: string; image_url?: string | null }>
 ) {
-  const { data: existing } = await supabase
-    .from("whatsapp_conversations")
-    .select("*")
-    .eq("business_id", businessId)
-    .eq("customer_phone", customerPhone)
-    .single();
+  const label = msg.product_name || msg.content.split(" — ")[0];
+  if (!label) return null;
+  const lower = label.toLowerCase();
+  return (
+    products.find((p) => p.name.toLowerCase() === lower) ||
+    products.find((p) => lower.includes(p.name.toLowerCase()) || p.name.toLowerCase().includes(lower)) ||
+    null
+  );
+}
 
-  if (existing) return existing;
-
-  const { data: created, error } = await supabase
-    .from("whatsapp_conversations")
-    .insert({
-      business_id: businessId,
-      customer_phone: customerPhone,
-      customer_name: customerName,
-      status: "active",
-    })
-    .select()
-    .single();
-
-  if (error) throw error;
-  return created;
+async function resolveReferredProduct(params: {
+  conversationId: string;
+  contextId?: string;
+  text: string;
+  products: Array<{ name: string; price: number; description?: string; image_url?: string | null }>;
+}) {
+  const db = await readDb();
+  const convMsgs = db.messages.filter((m) => m.conversation_id === params.conversationId);
+  if (params.contextId) {
+    const quoted = convMsgs.find((m) => m.whatsapp_message_id === params.contextId);
+    if (quoted) {
+      const hit = productFromStoredMessage(quoted, params.products);
+      if (hit) return hit;
+    }
+  }
+  const lower = params.text.toLowerCase();
+  const pointing =
+    /\b(yeh?|this|that|isi|usi|wala|wali|wale)\b/.test(lower) || /\d+\s*x\b/.test(lower);
+  if (!params.contextId && !pointing) return null;
+  const lastCatalog = [...convMsgs]
+    .reverse()
+    .find(
+      (m) =>
+        m.direction === "outbound" &&
+        (m.message_type === "image" || Boolean(m.product_name) || /Rs\.\d+/.test(m.content))
+    );
+  return lastCatalog ? productFromStoredMessage(lastCatalog, params.products) : null;
 }
 
 async function createOrderFromAgent(
-  supabase: ReturnType<typeof createAdminClient>,
-  businessId: string,
-  conversation: { id: string; customer_id: string | null; customer_name: string | null },
+  conversation: LocalConversation,
   orderData: ParsedOrderData,
-  customerPhone: string
+  customerPhone: string,
+  businessId: string
 ): Promise<string | null> {
-  let customerId = conversation.customer_id;
+  const db = await readDb();
+  let customer = conversation.customer_id
+    ? db.customers.find((c) => c.id === conversation.customer_id)
+    : db.customers.find((c) => c.business_id === businessId && c.phone === (orderData.phone || customerPhone));
 
-  if (!customerId) {
-    const { data: customer } = await supabase
-      .from("customers")
-      .upsert(
-        {
-          business_id: businessId,
-          name: orderData.customer_name || conversation.customer_name || "WhatsApp Customer",
-          phone: orderData.phone || customerPhone,
-          address: orderData.address,
-          whatsapp_id: customerPhone,
-        },
-        { onConflict: "business_id,phone" }
-      )
-      .select()
-      .single();
-
-    customerId = customer?.id ?? null;
-
-    if (customerId) {
-      await supabase
-        .from("whatsapp_conversations")
-        .update({ customer_id: customerId })
-        .eq("id", conversation.id);
-    }
+  if (!customer) {
+    customer = {
+      id: uid(),
+      business_id: businessId,
+      name: orderData.customer_name || conversation.customer_name || "WhatsApp Customer",
+      phone: orderData.phone || customerPhone,
+      email: null,
+      address: orderData.address,
+      notes: orderData.notes,
+      whatsapp_id: customerPhone,
+      total_orders: 0,
+      total_spent: 0,
+      created_at: nowIso(),
+    };
+    db.customers.push(customer);
   }
 
-  if (!customerId) return null;
+  const conv = db.conversations.find((c) => c.id === conversation.id);
+  if (conv) conv.customer_id = customer.id;
 
-  const { count } = await supabase
-    .from("orders")
-    .select("*", { count: "exact", head: true })
-    .eq("business_id", businessId);
-
-  const orderNumber = `ORD-${String((count ?? 0) + 1).padStart(5, "0")}`;
-
+  const count = db.orders.filter((o) => o.business_id === businessId).length;
+  const orderNumber = `ORD-${String(count + 1).padStart(5, "0")}`;
   const subtotal =
     orderData.subtotal ??
-    orderData.products.reduce(
-      (sum, p) => sum + (p.unit_price ?? 0) * p.quantity,
-      0
-    );
+    orderData.products.reduce((sum, p) => sum + (p.unit_price ?? 0) * p.quantity, 0);
   const total = orderData.total ?? subtotal + (orderData.delivery_fee ?? 0) - (orderData.discount ?? 0);
 
-  const { data: order, error } = await supabase
-    .from("orders")
-    .insert({
-      business_id: businessId,
-      order_number: orderNumber,
-      customer_id: customerId,
-      subtotal,
-      discount: orderData.discount ?? 0,
-      delivery_fee: orderData.delivery_fee ?? 0,
-      tax: 0,
-      total,
-      payment_method: orderData.payment_method ?? "cod",
-      payment_status: orderData.payment_status ?? "unpaid",
-      order_status: "pending",
-      delivery_address: orderData.address,
-      customer_note: orderData.notes,
-      source: "whatsapp",
-      whatsapp_conversation_id: conversation.id,
-    })
-    .select()
-    .single();
+  const orderId = uid();
+  db.orders.push({
+    id: orderId,
+    business_id: businessId,
+    order_number: orderNumber,
+    customer_id: customer.id,
+    subtotal,
+    discount: orderData.discount ?? 0,
+    delivery_fee: orderData.delivery_fee ?? 0,
+    tax: 0,
+    total,
+    payment_method: orderData.payment_method ?? "cod",
+    payment_status: orderData.payment_status ?? "unpaid",
+    order_status: "pending",
+    delivery_address: orderData.address,
+    customer_note: orderData.notes && !["naam", "address", "payment"].includes(orderData.notes) ? orderData.notes : null,
+    internal_note: null,
+    source: "whatsapp",
+    whatsapp_conversation_id: conversation.id,
+    created_at: nowIso(),
+    updated_at: nowIso(),
+  });
 
-  if (error || !order) return null;
-
-  if (orderData.products.length) {
-    await supabase.from("order_items").insert(
-      orderData.products.map((p) => ({
-        order_id: order.id,
-        product_name: p.name,
-        quantity: p.quantity,
-        unit_price: p.unit_price ?? 0,
-        variant: p.variant,
-      }))
-    );
+  for (const p of orderData.products) {
+    db.order_items.push({
+      id: uid(),
+      order_id: orderId,
+      product_id: null,
+      product_name: p.name,
+      quantity: p.quantity,
+      unit_price: p.unit_price ?? 0,
+      variant: p.variant,
+    });
   }
 
-  await supabase
-    .from("whatsapp_conversations")
-    .update({
-      pending_order_data: null,
-      status: "active",
-    })
-    .eq("id", conversation.id);
-
-  await supabase.from("notifications").insert({
+  customer.total_orders += 1;
+  customer.total_spent += total;
+  if (conv) {
+    conv.pending_order_data = null;
+    conv.status = "active";
+  }
+  db.notifications.push({
+    id: uid(),
     business_id: businessId,
     title: "New WhatsApp Order",
     message: `Order ${orderNumber} received via WhatsApp AI agent.`,
     type: "order",
-    metadata: { order_id: order.id },
+    read: false,
+    created_at: nowIso(),
   });
-
-  return order.id;
+  await writeDb(db);
+  return orderId;
 }
