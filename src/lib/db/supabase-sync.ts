@@ -140,6 +140,7 @@ export async function loadDbFromSupabase(): Promise<DatabaseShape> {
     whatsapp_configs: (configs.data || []).map((c) => ({
       ...c,
       agent_instructions: c.agent_instructions ?? null,
+      groq_api_key: c.groq_api_key ?? null,
     })) as LocalWhatsAppConfig[],
     templates: (templates.data || []) as LocalTemplate[],
     subscriptions: (subscriptions.data || []) as LocalSubscription[],
@@ -188,6 +189,7 @@ export async function saveDbToSupabase(db: DatabaseShape) {
     agent_name: c.agent_name,
     agent_greeting: c.agent_greeting,
     agent_instructions: c.agent_instructions,
+    groq_api_key: c.groq_api_key ?? null,
     auto_confirm_orders: c.auto_confirm_orders,
   }));
   const conversations = db.conversations.map((c) => ({ ...c }));

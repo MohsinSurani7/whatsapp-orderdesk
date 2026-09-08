@@ -15,12 +15,14 @@ export async function POST(request: NextRequest) {
     .filter((p) => p.business_id === businessId && p.is_active)
     .map((p) => ({ name: p.name, price: p.price }));
 
+  const config = db.whatsapp_configs.find((c) => c.business_id === businessId);
   const result = await processAgentMessage({
     message: text,
     conversationHistory: [],
     businessName: business?.name ?? "Business",
     agentName: "Order Assistant",
     products,
+    groqApiKey: config?.groq_api_key,
   });
 
   return NextResponse.json(result);

@@ -132,6 +132,7 @@ export interface LocalWhatsAppConfig {
   agent_name: string;
   agent_greeting: string;
   agent_instructions: string | null;
+  groq_api_key: string | null;
   auto_confirm_orders: boolean;
 }
 

@@ -71,6 +71,7 @@ export async function POST(request: NextRequest) {
       agent_greeting:
         "Assalam o Alaikum! Main aap ki order mein madad kar sakta hoon. Kya order karna chahte hain?",
       agent_instructions: null,
+      groq_api_key: null,
       auto_confirm_orders: false,
     });
   }

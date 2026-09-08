@@ -25,6 +25,7 @@ type AgentParams = {
   customerName?: string | null;
   instructions?: string | null;
   referredProduct?: CatalogProduct | null;
+  groqApiKey?: string | null;
   orderStats?: OrderStats;
 };
 
@@ -34,8 +35,8 @@ function looksLikeRealKey(key?: string) {
   return /^(sk-|gsk_|AIza)/.test(key) || key.length > 24;
 }
 
-function getAIClient(): { client: OpenAI; model: string } | null {
-  const groq = process.env.GROQ_API_KEY;
+function getAIClient(shopGroqKey?: string | null): { client: OpenAI; model: string } | null {
+  const groq = (shopGroqKey || process.env.GROQ_API_KEY || "").trim();
   if (looksLikeRealKey(groq)) {
     return {
       client: new OpenAI({ apiKey: groq, baseURL: "https://api.groq.com/openai/v1" }),
@@ -66,7 +67,7 @@ function getAIClient(): { client: OpenAI; model: string } | null {
 }
 
 export async function processAgentMessage(params: AgentParams): Promise<AgentResponse> {
-  const ai = getAIClient();
+  const ai = getAIClient(params.groqApiKey);
   if (ai) {
     try {
       const result = await llmAgent(ai.client, ai.model, params);
@@ -139,12 +140,14 @@ RULES:
 - Use PENDING_ORDER to continue the same order (don't restart unless customer wants new order).
 - If customer asks list/details/kn kn products, list name + Rs price (+ description).
 - If they ask photos and has_photo is true, set send_photos true. If no photos, say photos not uploaded.
-- Collect order step by step: items+qty, then naam, then address, then payment (COD/Easypaisa/JazzCash), then ask to confirm with "yes".
+- Collect a COMPLETE order ticket for the shop dashboard: items+qty+price, customer full name, WhatsApp/phone, full delivery address, payment method. These fields appear on Orders page — never skip them.
+- Collect step by step: items+qty, then naam, then address, then payment (COD/Easypaisa/JazzCash), then ask to confirm with "yes".
+- Put every collected field into parsed_order every turn (carry forward PENDING_ORDER).
 - should_create_order=true ONLY when items, naam, address, payment are all present AND customer confirmed.
 - Keep WhatsApp replies short (2-8 lines).
 
 Return ONLY JSON:
-{"reply":"string","intent":"greeting|product_inquiry|place_order|confirm_order|order_status|general|human_handoff","should_create_order":false,"send_photos":false,"photo_product_names":[],"parsed_order":{"customer_name":null,"address":null,"payment_method":null,"products":[{"name":"","quantity":1}],"notes":null}}`;
+{"reply":"string","intent":"greeting|product_inquiry|place_order|confirm_order|order_status|general|human_handoff","should_create_order":false,"send_photos":false,"photo_product_names":[],"parsed_order":{"customer_name":null,"phone":null,"address":null,"payment_method":null,"products":[{"name":"","quantity":1}],"notes":null}}`;
 
   const user = `DASHBOARD_PRODUCTS: ${JSON.stringify(catalogJson)}
 SHOP_NOTES: ${params.instructions || "(none)"}

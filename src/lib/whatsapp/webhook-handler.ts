@@ -189,6 +189,7 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
           customerName: conversation.customer_name,
           instructions: config.agent_instructions || config.agent_greeting,
           referredProduct,
+          groqApiKey: config.groq_api_key,
           orderStats: {
             total: bizOrders.length,
             delivered: bizOrders.filter((o) => o.order_status === "delivered").length,
@@ -345,13 +346,18 @@ async function createOrderFromAgent(
       phone: orderData.phone || customerPhone,
       email: null,
       address: orderData.address,
-      notes: orderData.notes,
+      notes: orderData.notes && !["naam", "address", "payment"].includes(String(orderData.notes)) ? orderData.notes : null,
       whatsapp_id: customerPhone,
       total_orders: 0,
       total_spent: 0,
       created_at: nowIso(),
     };
     db.customers.push(customer);
+  } else {
+    if (orderData.customer_name) customer.name = orderData.customer_name;
+    customer.phone = orderData.phone || customerPhone || customer.phone;
+    if (orderData.address) customer.address = orderData.address;
+    customer.whatsapp_id = customerPhone;
   }
 
   const conv = db.conversations.find((c) => c.id === conversation.id);
@@ -378,8 +384,8 @@ async function createOrderFromAgent(
     payment_method: orderData.payment_method ?? "cod",
     payment_status: orderData.payment_status ?? "unpaid",
     order_status: "pending",
-    delivery_address: orderData.address,
-    customer_note: orderData.notes && !["naam", "address", "payment"].includes(orderData.notes) ? orderData.notes : null,
+    delivery_address: orderData.address || customer.address,
+    customer_note: orderData.notes && !["naam", "address", "payment"].includes(String(orderData.notes)) ? orderData.notes : null,
     internal_note: null,
     source: "whatsapp",
     whatsapp_conversation_id: conversation.id,

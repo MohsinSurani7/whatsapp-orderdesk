@@ -13,6 +13,7 @@ export default function WhatsAppAgentPage() {
   const [saving, setSaving] = useState(false);
   const [copied, setCopied] = useState("");
   const [tokenInput, setTokenInput] = useState("");
+  const [groqInput, setGroqInput] = useState("");
   const [health, setHealth] = useState<{ ok?: boolean; message?: string; reason?: string } | null>(null);
   const webhookUrl =
     typeof window !== "undefined" ? `${window.location.origin}/api/webhooks/whatsapp` : "/api/webhooks/whatsapp";
@@ -165,6 +166,34 @@ export default function WhatsAppAgentPage() {
             <p className="mt-1 text-xs text-gray-500">
               Token yahi save hota hai (har shop ka apna). Temporary token ~24h. Permanent: Meta Business Settings →
               System Users → Generate token (`whatsapp_business_management` + `whatsapp_business_messaging`).
+            </p>
+          </div>
+          <div>
+            <Label>Groq API key (is shop ka apna AI)</Label>
+            <div className="mt-1 flex flex-col gap-2 sm:flex-row">
+              <Input
+                type="password"
+                value={groqInput}
+                onChange={(e) => setGroqInput(e.target.value)}
+                placeholder={
+                  config?.has_groq_key ? "Groq key saved — naya paste karke save karo" : "gsk_... Groq key paste karo"
+                }
+                className="font-mono text-xs"
+              />
+              <Button
+                type="button"
+                disabled={saving || groqInput.trim().length < 20}
+                onClick={async () => {
+                  await saveConfig({ groq_api_key: groqInput.trim() });
+                  setGroqInput("");
+                }}
+              >
+                Save Groq Key
+              </Button>
+            </div>
+            <p className="mt-1 text-xs text-gray-500">
+              Free key: console.groq.com → API Keys. Har buyer apni key yahan lagaye taake AI quota mix na ho. Llama 8B
+              Instant use hota hai — tez aur dashboard catalog se reply karta hai.
             </p>
           </div>
           <div>
