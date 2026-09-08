@@ -236,7 +236,10 @@ export default function WhatsAppAgentPage() {
           <p>1. Dashboard → <strong>Products</strong> — har item ka naam + price add karo (Cotton Suit, Lawn, etc.).</p>
           <p>2. Upar <strong>Agent training notes</strong> mein delivery charges, sizes, COD rules likho.</p>
           <p>3. Customer WhatsApp pe bolega “suit chahiye” — agent catalog se match karega.</p>
-          <p className="text-xs text-gray-500">Bina products ke agent generic jawab dega, kyunke usay pata nahi aap kya bechte ho.</p>
+          <p className="text-xs text-gray-500">
+            Agent replies Groq Llama (fast free open-source) se aati hain jab Netlify pe GROQ_API_KEY laga ho. Catalog
+            hamesha is dashboard ke Products + notes se aata hai.
+          </p>
         </CardContent>
       </Card>
     </div>

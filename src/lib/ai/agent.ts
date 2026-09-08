@@ -1,8 +1,5 @@
 import OpenAI from "openai";
-import type { AgentResponse, ParsedOrderData, PaymentStatus } from "@/types/database";
-
-const SYSTEM_PROMPT = `You are a WhatsApp order assistant for a small business in Pakistan.
-Reply in short Roman Urdu / English mix. Always return JSON only.`;
+import type { AgentIntent, AgentResponse, ParsedOrderData, PaymentStatus } from "@/types/database";
 
 type CatalogProduct = {
   name: string;
@@ -11,28 +8,14 @@ type CatalogProduct = {
   image_url?: string | null;
 };
 
-function looksLikeRealKey(key?: string) {
-  if (!key) return false;
-  if (/your-|placeholder|example|changeme/i.test(key)) return false;
-  return /^(sk-|gsk_|AIza)/.test(key);
-}
+type OrderStats = {
+  total: number;
+  delivered: number;
+  pending: number;
+  customerTotal: number;
+};
 
-function getAIClient() {
-  const groq = process.env.GROQ_API_KEY;
-  if (looksLikeRealKey(groq)) {
-    return new OpenAI({ apiKey: groq, baseURL: "https://api.groq.com/openai/v1" });
-  }
-  const key = process.env.AI_API_KEY || process.env.OPENAI_API_KEY;
-  if (looksLikeRealKey(key)) {
-    return new OpenAI({
-      apiKey: key,
-      baseURL: process.env.AI_BASE_URL || undefined,
-    });
-  }
-  return null;
-}
-
-export async function processAgentMessage(params: {
+type AgentParams = {
   message: string;
   conversationHistory: Array<{ role: "user" | "assistant"; content: string }>;
   businessName: string;
@@ -43,16 +26,57 @@ export async function processAgentMessage(params: {
   instructions?: string | null;
   referredProduct?: CatalogProduct | null;
   orderStats?: OrderStats;
-}): Promise<AgentResponse> {
-  return localAgent(params);
+};
+
+function looksLikeRealKey(key?: string) {
+  if (!key) return false;
+  if (/your-|placeholder|example|changeme/i.test(key)) return false;
+  return /^(sk-|gsk_|AIza)/.test(key) || key.length > 24;
 }
 
-type OrderStats = {
-  total: number;
-  delivered: number;
-  pending: number;
-  customerTotal: number;
-};
+function getAIClient(): { client: OpenAI; model: string } | null {
+  const groq = process.env.GROQ_API_KEY;
+  if (looksLikeRealKey(groq)) {
+    return {
+      client: new OpenAI({ apiKey: groq, baseURL: "https://api.groq.com/openai/v1" }),
+      model: process.env.GROQ_MODEL || "llama-3.1-8b-instant",
+    };
+  }
+  const gemini = process.env.GEMINI_API_KEY;
+  if (looksLikeRealKey(gemini)) {
+    return {
+      client: new OpenAI({
+        apiKey: gemini,
+        baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/",
+      }),
+      model: process.env.GEMINI_MODEL || "gemini-2.0-flash",
+    };
+  }
+  const key = process.env.AI_API_KEY || process.env.OPENAI_API_KEY;
+  if (looksLikeRealKey(key)) {
+    return {
+      client: new OpenAI({
+        apiKey: key,
+        baseURL: process.env.AI_BASE_URL || undefined,
+      }),
+      model: process.env.AI_MODEL || "gpt-4o-mini",
+    };
+  }
+  return null;
+}
+
+export async function processAgentMessage(params: AgentParams): Promise<AgentResponse> {
+  const ai = getAIClient();
+  if (ai) {
+    try {
+      const result = await llmAgent(ai.client, ai.model, params);
+      if (result.reply.trim()) return result;
+    } catch (error) {
+      console.error("LLM agent failed, falling back to local rules:", error);
+    }
+  }
+  return localAgent(params);
+}
 
 function catalogLine(products?: CatalogProduct[]) {
   if (!products?.length) return "";
@@ -72,6 +96,149 @@ function catalogReply(businessName: string, products?: CatalogProduct[]) {
   const catalog = catalogLine(products);
   if (!catalog) return emptyCatalogReply(businessName);
   return `${businessName} ke available products:\n${catalog}\n\nOrder: product ka naam + quantity (jaise "2x Cotton Suit").\nPhotos: "photo bhejo".`;
+}
+
+function imagesForNames(products: CatalogProduct[] | undefined, names: string[]) {
+  const catalog = products || [];
+  const wanted = names.length
+    ? catalog.filter((p) =>
+        names.some(
+          (n) =>
+            p.name.toLowerCase() === n.toLowerCase() ||
+            p.name.toLowerCase().includes(n.toLowerCase()) ||
+            n.toLowerCase().includes(p.name.toLowerCase())
+        )
+      )
+    : catalog;
+  return wanted
+    .filter((p) => p.image_url)
+    .slice(0, 10)
+    .map((p) => ({
+      path: p.image_url as string,
+      caption: [p.name, `Rs.${p.price}`, p.description].filter(Boolean).join(" — "),
+      productName: p.name,
+    }));
+}
+
+async function llmAgent(client: OpenAI, model: string, params: AgentParams): Promise<AgentResponse> {
+  const catalog = params.products || [];
+  const catalogJson = catalog.map((p) => ({
+    name: p.name,
+    price: p.price,
+    description: p.description || "",
+    has_photo: Boolean(p.image_url),
+  }));
+  const stats = params.orderStats;
+  const system = `You are ${params.agentName}, WhatsApp sales assistant for "${params.businessName}" (Pakistan shop).
+Talk like a real helpful shop person: natural short Roman Urdu + simple English. Warm, clear, not robotic, no repeated menu spam.
+
+RULES:
+- ONLY use products in DASHBOARD_PRODUCTS. Never invent items or prices.
+- If DASHBOARD_PRODUCTS is empty, honestly say catalog empty; malik must add products in dashboard. Do not take fake orders.
+- Use SHOP_NOTES for delivery charges, COD, timings, policies.
+- Use PENDING_ORDER to continue the same order (don't restart unless customer wants new order).
+- If customer asks list/details/kn kn products, list name + Rs price (+ description).
+- If they ask photos and has_photo is true, set send_photos true. If no photos, say photos not uploaded.
+- Collect order step by step: items+qty, then naam, then address, then payment (COD/Easypaisa/JazzCash), then ask to confirm with "yes".
+- should_create_order=true ONLY when items, naam, address, payment are all present AND customer confirmed.
+- Keep WhatsApp replies short (2-8 lines).
+
+Return ONLY JSON:
+{"reply":"string","intent":"greeting|product_inquiry|place_order|confirm_order|order_status|general|human_handoff","should_create_order":false,"send_photos":false,"photo_product_names":[],"parsed_order":{"customer_name":null,"address":null,"payment_method":null,"products":[{"name":"","quantity":1}],"notes":null}}`;
+
+  const user = `DASHBOARD_PRODUCTS: ${JSON.stringify(catalogJson)}
+SHOP_NOTES: ${params.instructions || "(none)"}
+CUSTOMER_WHATSAPP_NAME: ${params.customerName || "(unknown)"}
+PENDING_ORDER: ${JSON.stringify(params.pendingOrder || null)}
+REFERRED_PRODUCT: ${params.referredProduct ? JSON.stringify(params.referredProduct) : "null"}
+ORDER_STATS: ${stats ? JSON.stringify(stats) : "null"}
+LATEST_CUSTOMER_MESSAGE: ${params.message}`;
+
+  const history = (params.conversationHistory || []).slice(-8).map((m) => ({
+    role: m.role as "user" | "assistant",
+    content: m.content,
+  }));
+
+  const completion = await client.chat.completions.create(
+    {
+      model,
+      temperature: 0.4,
+      max_tokens: 500,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: system },
+        ...history,
+        { role: "user", content: user },
+      ],
+    },
+    { timeout: 9000 }
+  );
+
+  const raw = completion.choices[0]?.message?.content || "{}";
+  let parsed: Record<string, unknown> = {};
+  try {
+    parsed = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    const start = raw.indexOf("{");
+    const end = raw.lastIndexOf("}");
+    parsed = start >= 0 && end > start ? (JSON.parse(raw.slice(start, end + 1)) as Record<string, unknown>) : {};
+  }
+
+  const reply = String(parsed.reply || "").trim();
+  if (!reply) throw new Error("Empty LLM reply");
+
+  const rawOrder = (parsed.parsed_order || null) as Record<string, unknown> | null;
+  const extracted: ParsedOrderData | null = rawOrder
+    ? {
+        customer_name: (rawOrder.customer_name as string) || null,
+        phone: (rawOrder.phone as string) || null,
+        address: (rawOrder.address as string) || null,
+        products: Array.isArray(rawOrder.products)
+          ? (rawOrder.products as Array<{ name?: string; quantity?: number }>).map((p) => ({
+              name: String(p.name || ""),
+              quantity: Number(p.quantity) || 1,
+              variant: null,
+              unit_price: null,
+            })).filter((p) => p.name)
+          : [],
+        subtotal: null,
+        delivery_fee: null,
+        discount: null,
+        total: null,
+        payment_method: (rawOrder.payment_method as ParsedOrderData["payment_method"]) || null,
+        payment_status: null,
+        notes: (rawOrder.notes as string) || null,
+      }
+    : null;
+
+  const pending = mergeOrder(params.pendingOrder, extracted, params.products);
+  const intent = (["greeting", "place_order", "confirm_order", "cancel_order", "order_status", "product_inquiry", "payment_inquiry", "delivery_inquiry", "general", "human_handoff"].includes(String(parsed.intent))
+    ? parsed.intent
+    : "general") as AgentIntent;
+
+  const wantPhotos = Boolean(parsed.send_photos) || isPhotoRequest(params.message.toLowerCase());
+  const photoNames = Array.isArray(parsed.photo_product_names)
+    ? (parsed.photo_product_names as unknown[]).map((n) => String(n))
+    : [];
+  const send_images = wantPhotos ? imagesForNames(params.products, photoNames) : undefined;
+
+  const confirmed = Boolean(parsed.should_create_order);
+  const complete =
+    pending.products.length > 0 &&
+    Boolean(pending.customer_name) &&
+    Boolean(pending.address) &&
+    Boolean(pending.payment_method);
+
+  return {
+    intent,
+    reply,
+    parsed_order: pending.products.length || pending.customer_name || pending.address ? pending : extracted,
+    should_create_order: confirmed && complete,
+    order_id: null,
+    confidence: 0.85,
+    needs_human: intent === "human_handoff",
+    send_images: send_images?.length ? send_images : undefined,
+  };
 }
 
 function localAgent(params: {
