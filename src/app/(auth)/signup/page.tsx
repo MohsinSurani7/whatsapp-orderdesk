@@ -16,9 +16,11 @@ export default async function SignupPage({
       ? "Yeh email already registered hai. Sign in karein."
       : error === "required"
         ? "Email aur password zaroori hain."
-        : error
-          ? "Signup failed"
-          : "";
+        : error === "failed"
+          ? "Signup failed. Supabase Auth/DB check karein (profiles trigger)."
+          : error
+            ? "Signup failed"
+            : "";
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-gray-50 px-4">

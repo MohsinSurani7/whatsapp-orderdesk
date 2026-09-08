@@ -44,8 +44,15 @@ export async function POST(request: NextRequest) {
     if (error || !data.user) {
       const exists = /already|registered|exists/i.test(error?.message || "");
       if (isJson) return NextResponse.json({ error: error?.message || "Signup failed" }, { status: 400 });
-      return NextResponse.redirect(new URL(exists ? "/signup?error=exists" : "/signup?error=required", origin), 303);
+      return NextResponse.redirect(new URL(exists ? "/signup?error=exists" : "/signup?error=failed", origin), 303);
     }
+
+    await admin.from("profiles").upsert({
+      id: data.user.id,
+      email: email.toLowerCase(),
+      full_name: fullName || null,
+    });
+
     if (isJson) {
       const res = NextResponse.json({ ok: true, userId: data.user.id });
       await applySessionCookie(res, data.user.id, origin);
