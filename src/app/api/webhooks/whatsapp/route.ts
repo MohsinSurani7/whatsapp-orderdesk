@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { handleWhatsAppWebhook } from "@/lib/whatsapp/webhook-handler";
 
+export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 export async function GET(request: NextRequest) {

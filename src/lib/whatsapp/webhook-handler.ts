@@ -1,5 +1,8 @@
 import { processAgentMessage } from "@/lib/ai/agent";
 import { sendWhatsAppText, sendWhatsAppImage, markMessageAsRead } from "@/lib/whatsapp/client";
+import { resolveWhatsAppAuth } from "@/lib/whatsapp/credentials";
+import { isSupabaseEnabled } from "@/lib/db/supabase-sync";
+import { createAdminClient } from "@/lib/supabase/admin";
 import {
   nowIso,
   readDb,
@@ -40,11 +43,25 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
 
       const resolved = await resolveWhatsAppConfig(metadata.phone_number_id);
       const { config, business } = resolved;
-      if (!config.agent_enabled || !business) continue;
+      if (!business) {
+        console.error("WhatsApp webhook skipped: business missing");
+        continue;
+      }
+      if (config.agent_enabled === false) {
+        console.error("WhatsApp webhook skipped: agent disabled");
+        continue;
+      }
 
-      const accessToken = process.env.WHATSAPP_ACCESS_TOKEN || config.access_token;
-      const phoneNumberId = config.phone_number_id || metadata.phone_number_id;
-      if (!accessToken || !phoneNumberId) continue;
+      const auth = resolveWhatsAppAuth({
+        access_token: config.access_token,
+        phone_number_id: config.phone_number_id,
+      });
+      const accessToken = auth.accessToken;
+      const phoneNumberId = metadata.phone_number_id || auth.phoneNumberId;
+      if (!accessToken || !phoneNumberId) {
+        console.error("WhatsApp webhook skipped: missing token or phone number id");
+        continue;
+      }
 
       for (const msg of messages) {
         const textBody =
@@ -59,7 +76,10 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
         const db = await readDb();
         if (db.messages.some((m) => m.whatsapp_message_id === msg.id)) continue;
 
-        await markMessageAsRead(phoneNumberId, accessToken, msg.id).catch(() => undefined);
+        await markMessageAsRead(phoneNumberId, accessToken, msg.id).catch(async (err) => {
+          console.error("WhatsApp mark-read failed:", err);
+          await recordWhatsAppError(business.id, String(err));
+        });
 
         const customerPhone = msg.from;
         const customerWaName = contacts?.[0]?.profile?.name ?? null;
@@ -227,6 +247,7 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
           }
         } catch (error) {
           console.error("WhatsApp send failed:", error);
+          await recordWhatsAppError(business.id, String(error));
         }
       }
     }
@@ -366,4 +387,35 @@ async function createOrderFromAgent(
   });
   await writeDb(db);
   return orderId;
+}
+
+async function recordWhatsAppError(businessId: string, message: string) {
+  const text = message.slice(0, 500);
+  try {
+    if (isSupabaseEnabled()) {
+      const sb = createAdminClient();
+      await sb.from("notifications").insert({
+        business_id: businessId,
+        title: "WhatsApp send failed",
+        message: /expired|190/i.test(text)
+          ? "WhatsApp access token expire ho gaya. Meta se naya token banao, Netlify env + WhatsApp settings mein save karo."
+          : text,
+        type: "error",
+      });
+      return;
+    }
+    const db = await readDb();
+    db.notifications.push({
+      id: uid(),
+      business_id: businessId,
+      title: "WhatsApp send failed",
+      message: text,
+      type: "error",
+      read: false,
+      created_at: nowIso(),
+    });
+    await writeDb(db);
+  } catch (err) {
+    console.error("Failed to record WhatsApp error:", err);
+  }
 }

@@ -87,7 +87,7 @@ export async function markMessageAsRead(
   accessToken: string,
   messageId: string
 ) {
-  await fetch(`${WHATSAPP_API}/${phoneNumberId}/messages`, {
+  const response = await fetch(`${WHATSAPP_API}/${phoneNumberId}/messages`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -97,8 +97,13 @@ export async function markMessageAsRead(
       messaging_product: "whatsapp",
       status: "read",
       message_id: messageId,
+      typing_indicator: { type: "text" },
     }),
   });
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`WhatsApp mark-read failed: ${error}`);
+  }
 }
 
 export function renderTemplate(

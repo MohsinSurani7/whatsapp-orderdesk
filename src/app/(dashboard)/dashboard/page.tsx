@@ -5,6 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/utils";
+import { inspectWhatsAppToken, resolveWhatsAppAuth } from "@/lib/whatsapp/credentials";
 import { Bot, MessageCircle, Plus, ShoppingBag, Users, TrendingUp } from "lucide-react";
 import { format } from "date-fns";
 
@@ -21,6 +22,8 @@ export default async function DashboardPage() {
   const totalCustomers = db.customers.filter((c) => c.business_id === businessId).length;
   const recentOrders = [...orders].sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, 5);
   const waConfig = db.whatsapp_configs.find((c) => c.business_id === businessId);
+  const waAuth = resolveWhatsAppAuth(waConfig);
+  const waHealth = await inspectWhatsAppToken(waAuth.accessToken, waAuth.phoneNumberId);
   const activeConversations = db.conversations.filter(
     (c) => c.business_id === businessId && c.status === "active"
   ).length;
@@ -45,19 +48,19 @@ export default async function DashboardPage() {
         </Link>
       </div>
 
-      <Card className="border-green-200 bg-green-50">
+      <Card className={waHealth.ok ? "border-green-200 bg-green-50" : "border-red-300 bg-red-50"}>
         <CardContent className="flex items-center gap-4 p-4">
-          <div className="flex h-12 w-12 items-center justify-center rounded-full bg-green-600">
+          <div className={`flex h-12 w-12 items-center justify-center rounded-full ${waHealth.ok ? "bg-green-600" : "bg-red-600"}`}>
             <Bot className="h-6 w-6 text-white" />
           </div>
           <div className="flex-1">
-            <p className="font-semibold text-green-900">WhatsApp AI Agent</p>
-            <p className="text-sm text-green-700">
-              {waConfig?.agent_enabled
-                ? waConfig.phone_number_id
-                  ? "Active — automatically managing WhatsApp chats"
-                  : "Enabled — connect WhatsApp API to go live"
-                : "Disabled — enable in WhatsApp settings"}
+            <p className={`font-semibold ${waHealth.ok ? "text-green-900" : "text-red-900"}`}>WhatsApp AI Agent</p>
+            <p className={`text-sm ${waHealth.ok ? "text-green-700" : "text-red-700"}`}>
+              {waHealth.ok
+                ? waConfig?.agent_enabled
+                  ? "Active — WhatsApp token valid, agent replies kar sakta hai"
+                  : "Token valid hai lekin agent disabled hai"
+                : waHealth.message}
             </p>
           </div>
           <Link href="/whatsapp">

@@ -12,6 +12,8 @@ export default function WhatsAppAgentPage() {
   const [config, setConfig] = useState<Record<string, unknown> | null>(null);
   const [saving, setSaving] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [tokenInput, setTokenInput] = useState("");
+  const [health, setHealth] = useState<{ ok?: boolean; message?: string; reason?: string } | null>(null);
   const webhookUrl =
     typeof window !== "undefined" ? `${window.location.origin}/api/webhooks/whatsapp` : "/api/webhooks/whatsapp";
 
@@ -19,6 +21,9 @@ export default function WhatsAppAgentPage() {
     fetch("/api/whatsapp/config")
       .then((r) => r.json())
       .then((d) => setConfig(d.config || {}));
+    fetch("/api/whatsapp/health")
+      .then((r) => r.json())
+      .then((d) => setHealth(d));
   }, []);
 
   async function saveConfig(updates: Record<string, unknown>) {
@@ -45,6 +50,24 @@ export default function WhatsAppAgentPage() {
         <h1 className="text-2xl font-bold text-gray-900">WhatsApp AI Agent</h1>
         <p className="text-sm text-gray-500">Ye agent WhatsApp chats ke andar automatically orders manage karta hai</p>
       </div>
+      {health && health.ok === false && (
+        <Card className="border-red-300 bg-red-50">
+          <CardContent className="p-4 text-sm text-red-800">
+            <p className="font-semibold">Agent reply nahi kar raha — WhatsApp token invalid/expired</p>
+            <p className="mt-1">{health.message}</p>
+            <p className="mt-2 text-red-700">
+              Meta Developer → apna app → WhatsApp → API Setup → <strong>Generate access token</strong> (ya System User
+              permanent token). Phir token yahan save karo, aur Netlify Environment variable{" "}
+              <code>WHATSAPP_ACCESS_TOKEN</code> bhi update karke redeploy karo.
+            </p>
+          </CardContent>
+        </Card>
+      )}
+      {health?.ok && (
+        <Card className="border-green-200 bg-green-50">
+          <CardContent className="p-4 text-sm text-green-800">{health.message}</CardContent>
+        </Card>
+      )}
       <Card className="border-green-200">
         <CardHeader>
           <div className="flex items-center gap-3">
@@ -106,6 +129,34 @@ export default function WhatsAppAgentPage() {
               onBlur={(e) => saveConfig({ phone_number_id: e.target.value })}
               className="mt-1"
             />
+          </div>
+          <div>
+            <Label>Access Token (Meta)</Label>
+            <div className="mt-1 flex flex-col gap-2 sm:flex-row">
+              <Input
+                type="password"
+                value={tokenInput}
+                onChange={(e) => setTokenInput(e.target.value)}
+                placeholder={config?.has_token ? "Token saved — naya paste karke save karo" : "EAAG... token paste karo"}
+                className="font-mono text-xs"
+              />
+              <Button
+                type="button"
+                disabled={saving || tokenInput.trim().length < 20}
+                onClick={async () => {
+                  await saveConfig({ access_token: tokenInput.trim() });
+                  setTokenInput("");
+                  const next = await fetch("/api/whatsapp/health").then((r) => r.json());
+                  setHealth(next);
+                }}
+              >
+                Save Token
+              </Button>
+            </div>
+            <p className="mt-1 text-xs text-gray-500">
+              Temporary Meta token ~24h baad expire ho jata hai. Permanent ke liye Business Settings → System Users →
+              Generate token (whatsapp_business_management + whatsapp_business_messaging).
+            </p>
           </div>
           <div>
             <Label>Webhook URL</Label>

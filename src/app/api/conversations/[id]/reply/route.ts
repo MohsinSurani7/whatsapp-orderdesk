@@ -18,7 +18,7 @@ export async function POST(
 
   const config = db.whatsapp_configs.find((c) => c.business_id === businessId);
   const env = envWhatsAppDefaults();
-  const token = process.env.WHATSAPP_ACCESS_TOKEN || env.access_token || config?.access_token;
+  const token = config?.access_token || process.env.WHATSAPP_ACCESS_TOKEN || env.access_token;
   const phoneNumberId = config?.phone_number_id || env.phone_number_id;
 
   let waId: string | null = null;

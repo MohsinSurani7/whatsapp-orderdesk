@@ -32,7 +32,7 @@ export async function notifyCustomerOrderStatus(orderId: string, businessId: str
   const business = db.businesses.find((b) => b.id === businessId);
   const config = db.whatsapp_configs.find((c) => c.business_id === businessId);
   const env = envWhatsAppDefaults();
-  const token = process.env.WHATSAPP_ACCESS_TOKEN || env.access_token || config?.access_token;
+  const token = config?.access_token || process.env.WHATSAPP_ACCESS_TOKEN || env.access_token;
   const phoneNumberId = config?.phone_number_id || env.phone_number_id;
   const phone = customer?.phone || customer?.whatsapp_id;
   if (!token || !phoneNumberId || !phone || !business) {
