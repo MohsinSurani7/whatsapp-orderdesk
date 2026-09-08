@@ -67,7 +67,7 @@ export async function POST(request: NextRequest) {
       phone_number_id: env.phone_number_id,
       waba_id: env.waba_id,
       access_token: env.access_token,
-      verify_token: env.verify_token,
+      verify_token: env.verify_token ?? "",
       agent_enabled: true,
       agent_name: "Order Assistant",
       agent_greeting:
