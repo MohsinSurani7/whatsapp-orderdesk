@@ -57,11 +57,21 @@ type OrderStats = {
 function catalogLine(products?: CatalogProduct[]) {
   if (!products?.length) return "";
   return products
-    .map((p) => {
-      const desc = p.description ? ` — ${p.description}` : "";
-      return `• ${p.name} — Rs.${p.price}${desc}`;
+    .map((p, i) => {
+      const desc = p.description ? `\n   ${p.description}` : "";
+      return `${i + 1}) ${p.name} — Rs.${p.price}${desc}`;
     })
     .join("\n");
+}
+
+function emptyCatalogReply(businessName: string) {
+  return `Assalam o Alaikum! ${businessName} ki taraf se.\n\nAbhi dashboard pe koi product add nahi hai, is liye list / photos / order nahi le sakta.\n\nMalik: Dashboard → Products pe naam + price (+ photo) add karein. Add hote hi main WhatsApp pe catalog bhej dunga.`;
+}
+
+function catalogReply(businessName: string, products?: CatalogProduct[]) {
+  const catalog = catalogLine(products);
+  if (!catalog) return emptyCatalogReply(businessName);
+  return `${businessName} ke available products:\n${catalog}\n\nOrder: product ka naam + quantity (jaise "2x Cotton Suit").\nPhotos: "photo bhejo".`;
 }
 
 function localAgent(params: {
@@ -99,7 +109,27 @@ function localAgent(params: {
       : "";
     return {
       intent: "order_status",
-      reply: shop + mine + "\nNaya order ke liye product naam + quantity likhein.",
+      reply: shop + mine + (params.products?.length ? "\nNaya order ke liye product naam + quantity likhein." : "\nPehle dashboard pe products add hon, tab order ho sakega."),
+      parsed_order: previous.products.length ? previous : null,
+      confidence: 0.95,
+      ...empty,
+    };
+  }
+
+  if (isBye(lower) && !buyAsk && !photoAsk && !isCatalogAsk(lower)) {
+    return {
+      intent: "greeting",
+      reply: "Allah hafiz! Kuch chahiye ho to message kar dein.",
+      parsed_order: previous.products.length ? previous : null,
+      confidence: 0.9,
+      ...empty,
+    };
+  }
+
+  if (isCatalogAsk(lower) && !buyAsk && !photoAsk) {
+    return {
+      intent: "product_inquiry",
+      reply: catalogReply(params.businessName, params.products),
       parsed_order: previous.products.length ? previous : null,
       confidence: 0.95,
       ...empty,
@@ -116,7 +146,9 @@ function localAgent(params: {
     if (!targets.length) {
       return {
         intent: "product_inquiry",
-        reply: "Abhi product photos dashboard mein add nahi. Products page pe image upload karein.",
+        reply: params.products?.length
+          ? "Products hain lekin unki photos dashboard mein upload nahi. Products page pe image add karein, ya naam + quantity se order karein."
+          : emptyCatalogReply(params.businessName),
         parsed_order: previous.products.length ? previous : null,
         confidence: 0.9,
         ...empty,
@@ -139,25 +171,13 @@ function localAgent(params: {
     };
   }
 
-  if (isGreeting(lower) && !lastAsk && !buyAsk && !photoAsk) {
+  if (isGreeting(lower) && !lastAsk && !buyAsk && !photoAsk && !isCatalogAsk(lower)) {
     return {
       intent: "greeting",
-      reply: catalog
+      reply: params.products?.length
         ? `Assalam o Alaikum! ${params.businessName} mein ye available hai:\n${catalog}\n\nOrder: naam + quantity. Photos: "photo bhejo".`
-        : `Assalam o Alaikum! ${params.businessName} se order ke liye product aur quantity bhej dein.`,
+        : emptyCatalogReply(params.businessName),
       parsed_order: null,
-      confidence: 0.9,
-      ...empty,
-    };
-  }
-
-  if (isCatalogAsk(lower) && !buyAsk) {
-    return {
-      intent: "product_inquiry",
-      reply: catalog
-        ? `Hamare products:\n${catalog}\n\nPhoto ke liye "photo bhejo" likhein.`
-        : "Abhi catalog empty hai.",
-      parsed_order: previous.products.length ? previous : null,
       confidence: 0.9,
       ...empty,
     };
@@ -226,9 +246,9 @@ function localAgent(params: {
     if (!priced.products.length) {
       return {
         intent: "place_order",
-        reply: catalog
+        reply: params.products?.length
           ? `Kaunsa product lena hai? Available:\n${catalog}`
-          : "Pehle product naam aur quantity bhej dein.",
+          : emptyCatalogReply(params.businessName),
         parsed_order: priced,
         confidence: 0.7,
         ...empty,
@@ -256,7 +276,9 @@ function localAgent(params: {
 
   return {
     intent: "general",
-    reply: "Samajh aa gaya. Main madad kar sakta hoon: product photos, prices, naya order, ya kitne orders complete hue. Seedha likhein kya chahiye.",
+    reply: params.products?.length
+      ? `Main madad kar sakta hoon.\n• Catalog: "products dikhao"\n• Photos: "photo bhejo"\n• Order: product naam + quantity\n\nAbhi available:\n${catalog}`
+      : emptyCatalogReply(params.businessName),
     parsed_order: previous.products.length ? previous : null,
     confidence: 0.6,
     ...empty,
@@ -287,8 +309,26 @@ function isGreeting(lower: string) {
   return /(?:^|[\s,.!?])(salam|assalam|assalamualaikum|aoa|hello|hi|hey)(?:$|[\s,.!?])/.test(` ${lower} `);
 }
 
+function isBye(lower: string) {
+  return /^(bye+|goodbye|allah hafiz|khuda hafiz|ok bye)[\s!.]*$/.test(lower.trim());
+}
+
 function isCatalogAsk(lower: string) {
-  return /kya kya|menu\b|catalog|available|list (do|bhejo)|products? (kya|dikhao)/.test(lower);
+  const t = lower
+    .replace(/[?.!]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (
+    /kya kya|menu\b|catalog|available|rate list|price list|pricelist|stock list/.test(t)
+  ) {
+    return true;
+  }
+  const mentionsGoods = /product|products|item|items|saman|stock|catalog|menu/.test(t);
+  const asks =
+    /kn kn|kaun kaun|kons[aeiy]|konse|konsi|kya|hai|hain|dikhao|dikha|batao|bata|bhejo|bhej|send|list|detail|details|do\b/.test(
+      t
+    );
+  return mentionsGoods && asks;
 }
 
 function isAnsweringDetails(lower: string, text: string, lastAsk: "naam" | "address" | "payment" | null) {
