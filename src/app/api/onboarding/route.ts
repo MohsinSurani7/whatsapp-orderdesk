@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSessionUserId } from "@/lib/auth/session";
 import {
   defaultTemplates,
-  envWhatsAppDefaults,
   nowIso,
   readDb,
   uid,
@@ -15,7 +14,6 @@ export async function POST(request: NextRequest) {
 
   const body = await request.json();
   const db = await readDb();
-  const env = envWhatsAppDefaults();
 
   const already = db.members.find((m) => m.user_id === userId);
   if (already) {
@@ -64,10 +62,10 @@ export async function POST(request: NextRequest) {
     db.whatsapp_configs.push({
       id: uid(),
       business_id: business.id,
-      phone_number_id: env.phone_number_id,
-      waba_id: env.waba_id,
-      access_token: env.access_token,
-      verify_token: env.verify_token ?? "",
+      phone_number_id: null,
+      waba_id: null,
+      access_token: null,
+      verify_token: process.env.WHATSAPP_VERIFY_TOKEN || "",
       agent_enabled: true,
       agent_name: "Order Assistant",
       agent_greeting:

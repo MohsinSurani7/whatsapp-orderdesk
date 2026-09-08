@@ -43,32 +43,22 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
 
       const resolved = await resolveWhatsAppConfig(metadata.phone_number_id);
       const { config, business } = resolved;
-      if (!business) {
-        console.error("WhatsApp webhook skipped: business missing");
-        continue;
-      }
-      if (config.agent_enabled === false) {
-        console.error("WhatsApp webhook skipped: agent disabled");
+      if (!config || !business) {
+        console.error("WhatsApp webhook unmatched phone_number_id:", metadata.phone_number_id);
         continue;
       }
 
-      const auth = resolveWhatsAppAuth({
-        access_token: config.access_token,
-        phone_number_id: config.phone_number_id,
-      });
+      const auth = resolveWhatsAppAuth(config);
       const accessToken = auth.accessToken;
       const phoneNumberId = metadata.phone_number_id || auth.phoneNumberId;
-      if (!accessToken || !phoneNumberId) {
-        console.error("WhatsApp webhook skipped: missing token or phone number id");
-        continue;
-      }
+      const agentOn = config.agent_enabled !== false;
 
       for (const msg of messages) {
         const textBody =
           msg.type === "text"
             ? msg.text?.body
             : msg.type === "image"
-              ? msg.image?.caption || ""
+              ? msg.image?.caption || "[photo]"
               : "";
         if (msg.type !== "text" && msg.type !== "image") continue;
         if (msg.type === "text" && !textBody) continue;
@@ -76,13 +66,32 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
         const db = await readDb();
         if (db.messages.some((m) => m.whatsapp_message_id === msg.id)) continue;
 
-        await markMessageAsRead(phoneNumberId, accessToken, msg.id).catch(async (err) => {
-          console.error("WhatsApp mark-read failed:", err);
-          await recordWhatsAppError(business.id, String(err));
-        });
-
         const customerPhone = msg.from;
         const customerWaName = contacts?.[0]?.profile?.name ?? null;
+        let customer = db.customers.find(
+          (c) =>
+            c.business_id === business.id &&
+            (c.phone === customerPhone || c.whatsapp_id === customerPhone)
+        );
+        if (!customer) {
+          customer = {
+            id: uid(),
+            business_id: business.id,
+            name: customerWaName || "WhatsApp Customer",
+            phone: customerPhone,
+            email: null,
+            address: null,
+            notes: null,
+            whatsapp_id: customerPhone,
+            total_orders: 0,
+            total_spent: 0,
+            created_at: nowIso(),
+          };
+          db.customers.push(customer);
+        } else if (customerWaName && customer.name === "WhatsApp Customer") {
+          customer.name = customerWaName;
+        }
+
         let conversation = db.conversations.find(
           (c) => c.business_id === business.id && c.customer_phone === customerPhone
         );
@@ -91,20 +100,21 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
             id: uid(),
             business_id: business.id,
             customer_phone: customerPhone,
-            customer_id: null,
-            customer_name: customerWaName,
-            status: "active",
+            customer_id: customer.id,
+            customer_name: customerWaName || customer.name,
+            status: agentOn ? "active" : "handed_off",
             pending_order_data: null,
             last_message_at: nowIso(),
             created_at: nowIso(),
           };
           db.conversations.push(conversation);
+        } else {
+          conversation.customer_id = customer.id;
+          if (customerWaName) conversation.customer_name = customerWaName;
+          if (!agentOn) conversation.status = "handed_off";
         }
 
-        const inboundText =
-          textBody ||
-          (msg.context?.id ? "ye product chahiye" : "");
-        if (!inboundText) continue;
+        const inboundText = textBody || (msg.context?.id ? "ye product chahiye" : "[message]");
 
         db.messages.push({
           id: uid(),
@@ -119,6 +129,25 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
         });
         conversation.last_message_at = nowIso();
         await writeDb(db);
+
+        if (accessToken && phoneNumberId) {
+          await markMessageAsRead(phoneNumberId, accessToken, msg.id).catch(async (err) => {
+            console.error("WhatsApp mark-read failed:", err);
+            await recordWhatsAppError(business.id, String(err));
+          });
+        }
+
+        if (!agentOn) {
+          continue;
+        }
+
+        if (!accessToken || !phoneNumberId) {
+          await recordWhatsAppError(
+            business.id,
+            `Token missing — ${customerPhone} ka message save ho gaya. Dashboard → WhatsApp pe token save karke Chats se reply karein.`
+          );
+          continue;
+        }
 
         const history = db.messages
           .filter((m) => m.conversation_id === conversation!.id)

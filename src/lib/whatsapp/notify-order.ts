@@ -1,4 +1,4 @@
-import { envWhatsAppDefaults, nowIso, readDb, uid, writeDb } from "@/lib/db/store";
+import { nowIso, readDb, uid, writeDb } from "@/lib/db/store";
 import { sendWhatsAppText } from "@/lib/whatsapp/client";
 
 const STATUS_COPY: Record<string, string> = {
@@ -31,9 +31,8 @@ export async function notifyCustomerOrderStatus(orderId: string, businessId: str
   const customer = db.customers.find((c) => c.id === order.customer_id);
   const business = db.businesses.find((b) => b.id === businessId);
   const config = db.whatsapp_configs.find((c) => c.business_id === businessId);
-  const env = envWhatsAppDefaults();
-  const token = config?.access_token || process.env.WHATSAPP_ACCESS_TOKEN || env.access_token;
-  const phoneNumberId = config?.phone_number_id || env.phone_number_id;
+  const token = config?.access_token;
+  const phoneNumberId = config?.phone_number_id;
   const phone = customer?.phone || customer?.whatsapp_id;
   if (!token || !phoneNumberId || !phone || !business) {
     return { sent: false, error: "WhatsApp not configured" };

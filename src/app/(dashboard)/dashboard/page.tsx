@@ -63,9 +63,14 @@ export default async function DashboardPage() {
                 : waHealth.message}
             </p>
           </div>
-          <Link href="/whatsapp">
-            <Button variant="outline" size="sm">Configure</Button>
-          </Link>
+          <div className="flex shrink-0 flex-col gap-2 sm:flex-row">
+            <Link href="/whatsapp/conversations">
+              <Button variant="outline" size="sm">Chats</Button>
+            </Link>
+            <Link href="/whatsapp">
+              <Button variant="outline" size="sm">Configure</Button>
+            </Link>
+          </div>
         </CardContent>
       </Card>
 

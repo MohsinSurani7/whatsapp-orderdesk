@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionUserId } from "@/lib/auth/session";
-import { envWhatsAppDefaults, readDb } from "@/lib/db/store";
+import { readDb } from "@/lib/db/store";
 import { sendWhatsAppText, renderTemplate, buildWhatsAppLink } from "@/lib/whatsapp/client";
 
 export async function POST(request: NextRequest) {
@@ -19,7 +19,6 @@ export async function POST(request: NextRequest) {
     (t) => t.business_id === order.business_id && t.template_key === templateKey
   );
   const config = db.whatsapp_configs.find((c) => c.business_id === order.business_id);
-  const env = envWhatsAppDefaults();
 
   if (!customer || !business || !template) {
     return NextResponse.json({ error: "Missing order data" }, { status: 404 });
@@ -34,8 +33,8 @@ export async function POST(request: NextRequest) {
     business_name: business.name,
   });
 
-  const token = config?.access_token || process.env.WHATSAPP_ACCESS_TOKEN || env.access_token;
-  const phoneNumberId = config?.phone_number_id || env.phone_number_id;
+  const token = config?.access_token;
+  const phoneNumberId = config?.phone_number_id;
   if (token && phoneNumberId) {
     await sendWhatsAppText({
       phoneNumberId,

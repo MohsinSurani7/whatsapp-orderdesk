@@ -286,80 +286,15 @@ export function envWhatsAppDefaults() {
 
 export async function resolveWhatsAppConfig(phoneNumberId?: string | null) {
   const db = await readDb();
-  const env = envWhatsAppDefaults();
-  const match =
-    db.whatsapp_configs.find((c) => c.phone_number_id && c.phone_number_id === phoneNumberId) ||
-    db.whatsapp_configs.find((c) => c.phone_number_id === env.phone_number_id) ||
-    db.whatsapp_configs[0];
-
-  if (match) {
-    const business = db.businesses.find((b) => b.id === match.business_id);
-    return {
-      config: {
-        ...match,
-        access_token: env.access_token || match.access_token,
-        phone_number_id: match.phone_number_id || env.phone_number_id,
-      },
-      business,
-      db,
-    };
+  if (!phoneNumberId) {
+    return { config: null, business: null, db };
   }
 
-  if (!db.businesses[0]) {
-    const business: LocalBusiness = {
-      id: uid(),
-      name: "WhatsApp OrderDesk",
-      business_type: "whatsapp",
-      country: "PK",
-      currency: "PKR",
-      timezone: "Asia/Karachi",
-      phone: null,
-      whatsapp_number: null,
-      address: null,
-      logo_url: null,
-      invoice_prefix: "ORD",
-      default_order_status: "pending",
-      default_payment_method: "cod",
-      onboarding_completed: false,
-      created_at: nowIso(),
-    };
-    const config: LocalWhatsAppConfig = {
-      id: uid(),
-      business_id: business.id,
-      phone_number_id: phoneNumberId || env.phone_number_id,
-      waba_id: env.waba_id,
-      access_token: env.access_token,
-      verify_token: env.verify_token ?? "",
-      agent_enabled: true,
-      agent_name: "Order Assistant",
-      agent_greeting:
-        "Assalam o Alaikum! Main aap ki order mein madad kar sakta hoon. Kya order karna chahte hain?",
-      agent_instructions: null,
-      auto_confirm_orders: false,
-    };
-    db.businesses.push(business);
-    db.whatsapp_configs.push(config);
-    db.templates.push(...defaultTemplates(business.id));
-    await writeDb(db);
-    return { config, business, db };
+  const match = db.whatsapp_configs.find((c) => c.phone_number_id && c.phone_number_id === phoneNumberId);
+  if (!match) {
+    return { config: null, business: null, db };
   }
 
-  const business = db.businesses[0];
-  const config: LocalWhatsAppConfig = {
-    id: uid(),
-    business_id: business.id,
-    phone_number_id: phoneNumberId || env.phone_number_id,
-    waba_id: env.waba_id,
-    access_token: env.access_token,
-    verify_token: env.verify_token ?? "",
-    agent_enabled: true,
-    agent_name: "Order Assistant",
-    agent_greeting:
-      "Assalam o Alaikum! Main aap ki order mein madad kar sakta hoon. Kya order karna chahte hain?",
-    agent_instructions: null,
-    auto_confirm_orders: false,
-  };
-  db.whatsapp_configs.push(config);
-  await writeDb(db);
-  return { config, business, db };
+  const business = db.businesses.find((b) => b.id === match.business_id) ?? null;
+  return { config: match, business, db };
 }

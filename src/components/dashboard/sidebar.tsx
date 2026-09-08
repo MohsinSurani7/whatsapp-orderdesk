@@ -60,7 +60,10 @@ export function Sidebar({ businessName }: { businessName: string }) {
 
           <nav className="flex-1 space-y-1 p-4">
             {navItems.map(({ href, label, icon: Icon }) => {
-              const active = pathname === href || (href !== "/dashboard" && pathname.startsWith(href));
+              const active =
+                href === "/whatsapp"
+                  ? pathname === "/whatsapp"
+                  : pathname === href || (href !== "/dashboard" && pathname.startsWith(href));
               return (
                 <Link
                   key={href}

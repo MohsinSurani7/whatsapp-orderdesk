@@ -2,8 +2,8 @@ export function resolveWhatsAppAuth(config?: {
   access_token?: string | null;
   phone_number_id?: string | null;
 } | null) {
-  const accessToken = (config?.access_token || process.env.WHATSAPP_ACCESS_TOKEN || "").trim();
-  const phoneNumberId = (config?.phone_number_id || process.env.WHATSAPP_PHONE_NUMBER_ID || "").trim();
+  const accessToken = (config?.access_token || "").trim();
+  const phoneNumberId = (config?.phone_number_id || "").trim();
   return { accessToken, phoneNumberId };
 }
 
@@ -33,7 +33,7 @@ export async function inspectWhatsAppToken(accessToken: string, phoneNumberId: s
     ok: false as const,
     reason: expired ? ("expired" as const) : ("graph_error" as const),
     message: expired
-      ? "WhatsApp access token expire ho chuka hai. Meta se naya token generate karke Netlify env + dashboard mein save karo."
-      : "WhatsApp Graph API token reject kar rahi hai. Token / Phone Number ID check karo.",
+      ? "WhatsApp access token expire ho chuka hai. Dashboard → WhatsApp → naya token paste karke Save Token dabao. Code ya Netlify env change ki zaroorat nahi."
+      : "WhatsApp Graph API token reject kar rahi hai. Dashboard pe Phone Number ID aur token check karo.",
   };
 }

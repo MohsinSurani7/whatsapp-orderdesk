@@ -11,7 +11,7 @@ import { Bot, CheckCircle, Copy, ExternalLink } from "lucide-react";
 export default function WhatsAppAgentPage() {
   const [config, setConfig] = useState<Record<string, unknown> | null>(null);
   const [saving, setSaving] = useState(false);
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState("");
   const [tokenInput, setTokenInput] = useState("");
   const [health, setHealth] = useState<{ ok?: boolean; message?: string; reason?: string } | null>(null);
   const webhookUrl =
@@ -38,10 +38,10 @@ export default function WhatsAppAgentPage() {
     setSaving(false);
   }
 
-  function copyWebhook() {
-    navigator.clipboard.writeText(webhookUrl);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  function copyText(value: string, key: string) {
+    navigator.clipboard.writeText(value);
+    setCopied(key);
+    setTimeout(() => setCopied(""), 2000);
   }
 
   return (
@@ -56,9 +56,8 @@ export default function WhatsAppAgentPage() {
             <p className="font-semibold">Agent reply nahi kar raha — WhatsApp token invalid/expired</p>
             <p className="mt-1">{health.message}</p>
             <p className="mt-2 text-red-700">
-              Meta Developer → apna app → WhatsApp → API Setup → <strong>Generate access token</strong> (ya System User
-              permanent token). Phir token yahan save karo, aur Netlify Environment variable{" "}
-              <code>WHATSAPP_ACCESS_TOKEN</code> bhi update karke redeploy karo.
+              Meta se naya token generate karke <strong>yahi dashboard</strong> mein Save Token dabao. Code edit ya Netlify
+              redeploy ki zaroorat nahi.
             </p>
           </CardContent>
         </Card>
@@ -126,8 +125,18 @@ export default function WhatsAppAgentPage() {
             <Label>Phone Number ID</Label>
             <Input
               defaultValue={String(config?.phone_number_id ?? "")}
-              onBlur={(e) => saveConfig({ phone_number_id: e.target.value })}
+              onBlur={(e) => saveConfig({ phone_number_id: e.target.value.trim() })}
               className="mt-1"
+              placeholder="Meta → WhatsApp → API Setup"
+            />
+          </div>
+          <div>
+            <Label>WABA ID (optional)</Label>
+            <Input
+              defaultValue={String(config?.waba_id ?? "")}
+              onBlur={(e) => saveConfig({ waba_id: e.target.value.trim() })}
+              className="mt-1"
+              placeholder="WhatsApp Business Account ID"
             />
           </div>
           <div>
@@ -154,16 +163,29 @@ export default function WhatsAppAgentPage() {
               </Button>
             </div>
             <p className="mt-1 text-xs text-gray-500">
-              Temporary Meta token ~24h baad expire ho jata hai. Permanent ke liye Business Settings → System Users →
-              Generate token (whatsapp_business_management + whatsapp_business_messaging).
+              Token yahi save hota hai (har shop ka apna). Temporary token ~24h. Permanent: Meta Business Settings →
+              System Users → Generate token (`whatsapp_business_management` + `whatsapp_business_messaging`).
             </p>
           </div>
           <div>
-            <Label>Webhook URL</Label>
+            <Label>Webhook URL (Meta pe yehi lagao)</Label>
             <div className="mt-1 flex gap-2">
               <Input value={webhookUrl} readOnly className="bg-gray-50 font-mono text-xs" />
-              <Button variant="outline" size="icon" onClick={copyWebhook}>
-                {copied ? <CheckCircle size={16} /> : <Copy size={16} />}
+              <Button variant="outline" size="icon" onClick={() => copyText(webhookUrl, "url")}>
+                {copied === "url" ? <CheckCircle size={16} /> : <Copy size={16} />}
+              </Button>
+            </div>
+          </div>
+          <div>
+            <Label>Verify token (Meta webhook)</Label>
+            <div className="mt-1 flex gap-2">
+              <Input value={String(config?.verify_token ?? "")} readOnly className="bg-gray-50 font-mono text-xs" />
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={() => copyText(String(config?.verify_token ?? ""), "verify")}
+              >
+                {copied === "verify" ? <CheckCircle size={16} /> : <Copy size={16} />}
               </Button>
             </div>
           </div>
@@ -175,6 +197,34 @@ export default function WhatsAppAgentPage() {
           >
             Meta WhatsApp Setup Guide <ExternalLink size={14} />
           </a>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>100 shops ko kaise setup do</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3 text-sm text-gray-700">
+          <p>
+            Har buyer <strong>apna account</strong> banata hai → onboarding → <strong>apna</strong> Phone Number ID +
+            token yahan save karta hai. Agent sirf usi shop ke products, notes, aur chats use karta hai.
+          </p>
+          <p>
+            1. Unhein signup link do:{" "}
+            <span className="font-mono text-xs">{typeof window !== "undefined" ? window.location.origin : ""}/signup</span>
+          </p>
+          <p>2. Products + agent notes unke dashboard pe.</p>
+          <p>
+            3. Meta webhook (sab ke liye same URL): copy karke unke WhatsApp app pe Callback URL + Verify token lagaao,
+            field <strong>messages</strong> subscribe.
+          </p>
+          <p>
+            4. Unka token expire ho to woh khud naya token yahan save karein — aapko code nahi chhedna.
+          </p>
+          <p className="text-xs text-gray-500">
+            Agent off ho ya token fail ho: customer ka message <strong>Conversations</strong> mein save rehta hai. Admin
+            wahan se seedha uske WhatsApp pe reply bhej sakta hai.
+          </p>
         </CardContent>
       </Card>
 

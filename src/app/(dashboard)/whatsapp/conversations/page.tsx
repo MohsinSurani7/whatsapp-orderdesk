@@ -17,7 +17,7 @@ export default async function ConversationsPage() {
     <div className="space-y-6 pb-20 lg:pb-0">
       <div>
         <h1 className="text-2xl font-bold text-gray-900">WhatsApp Conversations</h1>
-        <p className="text-sm text-gray-500">Har chat save hoti hai — khol ke poori history dekho</p>
+        <p className="text-sm text-gray-500">Har chat save hoti hai — agent off ho ya token fail, aap yahan se WhatsApp pe reply kar sakte ho</p>
       </div>
       {!conversations.length ? (
         <Card>
@@ -32,6 +32,7 @@ export default async function ConversationsPage() {
           {conversations.map((conv) => {
             const messages = db.messages.filter((m) => m.conversation_id === conv.id);
             const lastMsg = messages[messages.length - 1];
+            const needsReply = lastMsg?.direction === "inbound";
             return (
               <Link key={conv.id} href={`/whatsapp/conversations/${conv.id}`} className="block">
                 <Card className="transition-shadow hover:shadow-md">
@@ -43,9 +44,12 @@ export default async function ConversationsPage() {
                       <div className="flex flex-wrap items-center gap-2">
                         <p className="font-medium text-gray-900">{conv.customer_name || conv.customer_phone}</p>
                         <StatusBadge status={conv.status} />
+                        {needsReply && <StatusBadge status="needs_reply" />}
                       </div>
                       <p className="truncate text-sm text-gray-500">
-                        {lastMsg ? `${lastMsg.direction === "outbound" ? "Agent: " : ""}${lastMsg.content}` : "No messages"}
+                        {lastMsg
+                          ? `${lastMsg.direction === "outbound" ? "You: " : ""}${lastMsg.content}`
+                          : "No messages"}
                       </p>
                     </div>
                     <p className="hidden shrink-0 text-xs text-gray-400 sm:block">

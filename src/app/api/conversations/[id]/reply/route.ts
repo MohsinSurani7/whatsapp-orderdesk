@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionUserId } from "@/lib/auth/session";
-import { envWhatsAppDefaults, nowIso, readDb, uid, writeDb } from "@/lib/db/store";
+import { nowIso, readDb, uid, writeDb } from "@/lib/db/store";
 import { sendWhatsAppText } from "@/lib/whatsapp/client";
+import { resolveWhatsAppAuth } from "@/lib/whatsapp/credentials";
 
 export async function POST(
   request: NextRequest,
@@ -17,19 +18,30 @@ export async function POST(
   if (!conv || !text) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
   const config = db.whatsapp_configs.find((c) => c.business_id === businessId);
-  const env = envWhatsAppDefaults();
-  const token = config?.access_token || process.env.WHATSAPP_ACCESS_TOKEN || env.access_token;
-  const phoneNumberId = config?.phone_number_id || env.phone_number_id;
+  const { accessToken, phoneNumberId } = resolveWhatsAppAuth(config);
+  if (!accessToken || !phoneNumberId) {
+    return NextResponse.json(
+      { error: "Pehle Dashboard → WhatsApp pe Access Token aur Phone Number ID save karein." },
+      { status: 400 }
+    );
+  }
 
   let waId: string | null = null;
-  if (token && phoneNumberId) {
+  try {
     const sent = await sendWhatsAppText({
       phoneNumberId,
-      accessToken: token,
+      accessToken,
       to: conv.customer_phone,
       message: String(text),
     });
     waId = sent?.messages?.[0]?.id ?? null;
+  } catch (error) {
+    return NextResponse.json(
+      { error: String(error).includes("expired") || String(error).includes("190")
+          ? "WhatsApp token expire hai. Dashboard → WhatsApp pe naya token save karein."
+          : "WhatsApp pe message nahi gaya. Token / number check karein." },
+      { status: 502 }
+    );
   }
 
   db.messages.push({
@@ -44,6 +56,7 @@ export async function POST(
     created_at: nowIso(),
   });
   conv.last_message_at = nowIso();
+  conv.status = "active";
   await writeDb(db);
   return NextResponse.json({ ok: true });
 }
