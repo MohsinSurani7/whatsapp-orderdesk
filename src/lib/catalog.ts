@@ -47,7 +47,12 @@ export function uniqueCategories(products: ShopProduct[]): string[] {
 export function productsInCategory(products: ShopProduct[], category: string): ShopProduct[] {
   const key = category.trim().toLowerCase();
   if (!key || key === "all") return products;
-  return products.filter((p) => (p.category || "").trim().toLowerCase() === key);
+  const exact = products.filter((p) => (p.category || "").trim().toLowerCase() === key);
+  if (exact.length) return exact;
+  // soft match on name/description for virtual categories like Shoes
+  return products.filter((p) =>
+    `${p.name} ${p.category || ""} ${p.description || ""}`.toLowerCase().includes(key)
+  );
 }
 
 export function truncateText(text: string, max = DESC_PREVIEW_LEN) {

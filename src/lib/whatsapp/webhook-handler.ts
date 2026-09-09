@@ -69,7 +69,11 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
       const agentOn = config.agent_enabled !== false;
 
       for (const msg of messages) {
-        const inbound = await resolveInboundText(msg, auth.accessToken, config.groq_api_key);
+        const inbound = await resolveInboundText(
+          msg,
+          auth.accessToken,
+          config.groq_api_key || process.env.GROQ_API_KEY || null
+        );
         if (!inbound) continue;
         const textBody = inbound.text;
 
@@ -131,6 +135,10 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
         }
 
         const inboundText = textBody || (msg.context?.id ? "ye product chahiye" : "[message]");
+        const voiceOk =
+          (msg.type === "audio" || msg.type === "voice") &&
+          !/^\[voice (message|failed)/i.test(inboundText.trim());
+        const storedInbound = voiceOk ? `🎤 ${inboundText}` : inboundText;
 
         db.messages.push({
           id: uid(),
@@ -145,7 +153,7 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
                 : msg.type === "interactive"
                   ? "interactive"
                   : "text",
-          content: inboundText,
+          content: storedInbound,
           whatsapp_message_id: msg.id,
           image_url: null,
           created_at: nowIso(),
@@ -170,7 +178,7 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
           .slice(-20)
           .map((m) => ({
             role: (m.direction === "inbound" ? "user" : "assistant") as "user" | "assistant",
-            content: m.content,
+            content: m.content.replace(/^🎤\s*/, ""),
           }));
 
         const products = db.products
@@ -310,19 +318,25 @@ async function resolveInboundText(
   if (msg.type === "audio" || msg.type === "voice") {
     const mediaId = msg.audio?.id || msg.voice?.id;
     if (!mediaId || !accessToken) {
-      return { text: "[voice message]", category: null, seeMoreId: null };
+      console.error("Voice message missing media id or access token");
+      return { text: "[voice failed]", category: null, seeMoreId: null };
     }
     try {
       const file = await downloadWhatsAppMedia(accessToken, mediaId);
+      console.log("Voice media downloaded", file.bytes.length, file.mimeType);
       const spoken = await transcribeWhatsAppAudio({
         groqApiKey: groqKey,
         bytes: file.bytes,
         mimeType: msg.audio?.mime_type || msg.voice?.mime_type || file.mimeType,
       });
-      return { text: spoken || "[voice message]", category: null, seeMoreId: null };
+      if (!spoken) {
+        return { text: "[voice failed]", category: null, seeMoreId: null };
+      }
+      // Prefix helps dashboards; agent still reads the spoken words
+      return { text: spoken, category: null, seeMoreId: null };
     } catch (err) {
       console.error("Voice transcribe failed:", err);
-      return { text: "[voice message]", category: null, seeMoreId: null };
+      return { text: "[voice failed]", category: null, seeMoreId: null };
     }
   }
   return null;

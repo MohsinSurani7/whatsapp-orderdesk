@@ -15,20 +15,38 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useState } from "react";
+import { useDashboardBadges } from "@/components/dashboard/badges";
 
 const navItems = [
-  { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { href: "/orders", label: "Orders", icon: ShoppingBag },
-  { href: "/customers", label: "Customers", icon: Users },
-  { href: "/products", label: "Products", icon: Package },
-  { href: "/whatsapp", label: "WhatsApp Agent", icon: Bot },
-  { href: "/whatsapp/conversations", label: "Conversations", icon: MessageCircle },
-  { href: "/settings", label: "Settings", icon: Settings },
+  { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard, badgeKey: "attention" as const },
+  { href: "/orders", label: "Orders", icon: ShoppingBag, badgeKey: "orders" as const },
+  { href: "/customers", label: "Customers", icon: Users, badgeKey: null },
+  { href: "/products", label: "Products", icon: Package, badgeKey: null },
+  { href: "/whatsapp", label: "WhatsApp Agent", icon: Bot, badgeKey: null },
+  { href: "/whatsapp/conversations", label: "Conversations", icon: MessageCircle, badgeKey: "chats" as const },
+  { href: "/settings", label: "Settings", icon: Settings, badgeKey: null },
 ];
+
+function Badge({ n }: { n: number }) {
+  if (!n) return null;
+  return (
+    <span className="ml-auto inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-red-600 px-1.5 py-0.5 text-[10px] font-bold text-white">
+      {n > 99 ? "99+" : n}
+    </span>
+  );
+}
 
 export function Sidebar({ businessName }: { businessName: string }) {
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
+  const badges = useDashboardBadges(4000);
+
+  function countFor(key: "attention" | "orders" | "chats" | null) {
+    if (key === "orders") return badges.pendingOrders;
+    if (key === "chats") return badges.attentionChats;
+    if (key === "attention") return badges.unreadNotifications || badges.attentionChats;
+    return 0;
+  }
 
   return (
     <>
@@ -59,7 +77,7 @@ export function Sidebar({ businessName }: { businessName: string }) {
           </div>
 
           <nav className="flex-1 space-y-1 p-4">
-            {navItems.map(({ href, label, icon: Icon }) => {
+            {navItems.map(({ href, label, icon: Icon, badgeKey }) => {
               const active =
                 href === "/whatsapp"
                   ? pathname === "/whatsapp"
@@ -78,6 +96,7 @@ export function Sidebar({ businessName }: { businessName: string }) {
                 >
                   <Icon size={18} />
                   {label}
+                  <Badge n={countFor(badgeKey)} />
                 </Link>
               );
             })}
@@ -89,9 +108,12 @@ export function Sidebar({ businessName }: { businessName: string }) {
                 <Bot size={16} className="text-green-600" />
                 <span className="text-xs font-medium text-green-700">AI Agent Active</span>
               </div>
-              <p className="mt-1 text-xs text-green-600">
-                WhatsApp chats auto-managed
-              </p>
+              <p className="mt-1 text-xs text-green-600">Groq AI + dashboard catalog</p>
+              {badges.attentionChats > 0 && (
+                <p className="mt-2 text-xs font-semibold text-amber-700">
+                  {badges.attentionChats} chat need you
+                </p>
+              )}
             </div>
           </div>
         </div>

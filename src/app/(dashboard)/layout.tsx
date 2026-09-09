@@ -1,6 +1,7 @@
 import { Sidebar } from "@/components/dashboard/sidebar";
 import { MobileNav } from "@/components/dashboard/mobile-nav";
 import { LiveRefresh } from "@/components/dashboard/live-refresh";
+import { DesktopNotifyGate } from "@/components/dashboard/badges";
 import { requireBusiness } from "@/lib/auth/business";
 import { clearSessionCookie } from "@/lib/auth/session";
 import { redirect } from "next/navigation";
@@ -19,6 +20,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
 
   return (
     <div className="min-h-screen bg-gray-50">
+      <DesktopNotifyGate />
       <Sidebar businessName={business.name} />
       <div className="lg:pl-64">
         <header className="sticky top-0 z-20 flex h-14 items-center justify-between border-b border-gray-200 bg-white px-4 sm:h-16 sm:px-6 lg:px-8">

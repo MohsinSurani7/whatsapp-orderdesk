@@ -97,34 +97,159 @@ export async function processAgentMessage(params: AgentParams): Promise<AgentRes
     }
   }
 
-  const ai = getAIClient(params.groqApiKey);
+  // Voice failed → ask to type (do not dump generic catalog help)
+  if (isVoiceFailedMarker(params.message)) {
+    const lang = inferCustomerLanguage(
+      lastUserText(params.conversationHistory) || "hello",
+      params.conversationHistory
+    );
+    return {
+      intent: "general",
+      reply:
+        lang === "English"
+          ? "I couldn't hear your voice note clearly. Please type your message (e.g. Do you have shoes?)."
+          : "Voice note clear nahi suni. Baraye meherbani type karke likhein (jaise: shoes hain?).",
+      parsed_order: params.pendingOrder ? mergeOrder(params.pendingOrder, null, params.products) : null,
+      should_create_order: false,
+      order_id: null,
+      confidence: 1,
+      needs_human: false,
+      skip_media: true,
+    };
+  }
+
+  // "2" / "number 3" → map to last numbered catalog product
+  const numberPick = resolveNumberedProductPick(params.message, params.conversationHistory, params.products);
+  let working: AgentParams = params;
+  if (numberPick) {
+    working = {
+      ...params,
+      message: `${params.message} (selected catalog #${numberPick.index}: ${numberPick.product.name})`,
+      referredProduct: numberPick.product,
+    };
+  }
+
+  // Category word like shoes / bags from message
+  const categoryHint = detectCategoryFromMessage(working.message, working.products);
+  if (categoryHint && !working.selectedCategory) {
+    working = { ...working, selectedCategory: categoryHint };
+  }
+
+  const ai = getAIClient(working.groqApiKey);
   let result: AgentResponse;
   if (ai) {
     try {
-      const llm = await llmAgent(ai.client, ai.model, params);
+      const llm = await llmAgent(ai.client, ai.model, working);
       if (!llm.reply.trim()) throw new Error("Empty Groq reply");
       result = llm;
     } catch (error) {
       console.error("LLM agent failed, falling back to local rules:", error);
-      result = localAgent(params);
+      result = localAgent(working);
     }
   } else {
-    result = localAgent(params);
+    result = localAgent(working);
+    const missingKey = !looksLikeRealKey(working.groqApiKey || process.env.GROQ_API_KEY);
+    if (missingKey) {
+      const en = inferCustomerLanguage(working.message, working.conversationHistory) === "English";
+      result = {
+        ...result,
+        reply: en
+          ? `${result.reply}\n\n(Shop owner: add Groq API key in WhatsApp settings for full AI chat.)`
+          : `${result.reply}\n\n(Malik: WhatsApp settings mein Groq API key add karein taake full AI chat chale.)`,
+      };
+    }
   }
+
   result = {
     ...result,
     reply: stripPhotoTalk(result.reply),
   };
-  result = attachProductMedia(result, params);
-  result = withShopMenus(result, params);
-  if (needsStaffAttention(params.message) || result.intent === "human_handoff") {
+  result = attachProductMedia(result, working);
+  result = withShopMenus(result, working);
+
+  const cancelAsk = isCancelRequest(working.message);
+  if (cancelAsk || needsStaffAttention(working.message) || result.intent === "human_handoff" || result.intent === "cancel_order") {
     result = {
       ...result,
       needs_human: true,
-      intent: "human_handoff",
+      intent: cancelAsk ? "human_handoff" : result.intent === "cancel_order" ? "human_handoff" : "human_handoff",
+      reply: cancelAsk
+        ? appendCancelAck(result.reply, inferCustomerLanguage(working.message, working.conversationHistory))
+        : result.reply,
     };
   }
   return result;
+}
+
+function appendCancelAck(reply: string, lang: string) {
+  const note =
+    lang === "English"
+      ? "I've flagged your cancel request for the shop team — they'll check the dashboard now."
+      : "Aap ki cancel request shop team ko flag kar di — dashboard pe abhi attention aa gayi hai.";
+  if (/flag|attention|dashboard|team/i.test(reply)) return reply;
+  return `${reply.trim()}\n\n${note}`;
+}
+
+function isVoiceFailedMarker(message: string) {
+  return /^\[voice message\]$/i.test(message.trim()) || /^\[voice failed/i.test(message.trim());
+}
+
+function lastUserText(history?: Array<{ role: string; content: string }>) {
+  return [...(history || [])].reverse().find((m) => m.role === "user")?.content || "";
+}
+
+function detectCategoryFromMessage(message: string, products?: CatalogProduct[]) {
+  const cats = uniqueCategories(products || []);
+  const lower = message.toLowerCase();
+  for (const c of cats) {
+    if (lower.includes(c.toLowerCase())) return c;
+  }
+  if (/\bshoes?\b|joota|joote|sneakers?|footwear/.test(lower)) {
+    const hit = cats.find((c) => /shoe|footwear|sneaker|joota/i.test(c));
+    if (hit) return hit;
+    // virtual category if products mention shoes in name/description
+    const soft = (products || []).filter((p) =>
+      /shoe|sneaker|joota|footwear/i.test(`${p.name} ${p.category || ""} ${p.description || ""}`)
+    );
+    if (soft.length) return "Shoes";
+  }
+  return null;
+}
+
+function resolveNumberedProductPick(
+  message: string,
+  history: Array<{ role: string; content: string }> | undefined,
+  products?: CatalogProduct[]
+): { index: number; product: CatalogProduct } | null {
+  if (!products?.length) return null;
+  const m = message.trim().match(/^(?:no\.?|number|#|option|item)?\s*(\d{1,2})\s*[.)]?$/i);
+  const n = m ? parseInt(m[1], 10) : null;
+  if (!n || n < 1) return null;
+
+  // Prefer last assistant numbered list
+  const lastAssistant = [...(history || [])].reverse().find((h) => h.role === "assistant" && /\d+\)/.test(h.content));
+  if (lastAssistant) {
+    const lines = lastAssistant.content.split(/\n/).map((l) => l.trim());
+    for (const line of lines) {
+      const hit = line.match(/^(\d+)\)\s*([^*—\n-]+)/);
+      if (hit && parseInt(hit[1], 10) === n) {
+        const name = hit[2].replace(/—.*$/, "").replace(/\s+Rs\..*$/i, "").trim();
+        const product =
+          products.find((p) => p.name.toLowerCase() === name.toLowerCase()) ||
+          findProductInText(name.toLowerCase(), products);
+        if (product) return { index: n, product };
+      }
+    }
+  }
+  if (n <= products.length) return { index: n, product: products[n - 1] };
+  return null;
+}
+
+function isCancelRequest(message: string) {
+  const t = message.toLowerCase();
+  return /cancel|order cancel|cancel karo|cancel krdo|cancel kar do|cancel kar den|mera order cancel|don't want|nahi chahiye order/.test(
+    t
+  );
 }
 
 function withShopMenus(result: AgentResponse, params: AgentParams): AgentResponse {
@@ -204,9 +329,11 @@ function attachProductMedia(result: AgentResponse, params: AgentParams): AgentRe
 function needsStaffAttention(message: string) {
   const t = message.toLowerCase();
   return (
+    isCancelRequest(t) ||
     /insan se|human|operator|manager se baat|complaint|complain|fraud|scam|cheat|dhamki|police|court|refund nahi|bewaqoof|gali|mc\b|bc\b|bsdk|porn|sex|nude/.test(
       t
-    ) || t.length > 400
+    ) ||
+    t.length > 400
   );
 }
 
@@ -251,13 +378,14 @@ function imagesForNames(products: CatalogProduct[] | undefined, names: string[])
 
 async function llmAgent(client: OpenAI, model: string, params: AgentParams): Promise<AgentResponse> {
   const catalog = params.products || [];
-  const catalogJson = catalog.map((p) => ({
+  const catalogJson = catalog.map((p, i) => ({
+    n: i + 1,
     id: p.id,
     name: p.name,
     price: p.price,
     category: p.category || "",
     sizes: parseSizeOptions(p.sizes),
-    description_short: (p.description || "").slice(0, 90),
+    description_short: (p.description || "").slice(0, 120),
     has_photo: Boolean(p.image_url),
   }));
   const stats = params.orderStats;
@@ -269,31 +397,33 @@ async function llmAgent(client: OpenAI, model: string, params: AgentParams): Pro
     .join(" | ");
   const historyTurns = (params.conversationHistory || []).length;
   const replyLang = inferCustomerLanguage(params.message, params.conversationHistory);
-  const system = `You are ${params.agentName}, a live WhatsApp sales agent for "${params.businessName}".
-Read LATEST_CUSTOMER_MESSAGE carefully, understand intent, then reply like a real human shopkeeper.
+  const system = `You are ${params.agentName}, the brain of WhatsApp shop "${params.businessName}".
+You are a real helpful salesperson powered by Groq. Think, understand the customer's message (including voice transcripts), then reply naturally.
 
-LANGUAGE (critical):
-- Reply in ${replyLang}.
-- If the customer writes English, reply in English. If they write Roman Urdu/Urdu, reply in that.
-- If they say "talk in English" / "English mein baat karo" (or Urdu), SWITCH and stay in that language.
-- Never force Urdu when they used English. Never dump a canned first greeting.
+LANGUAGE (must follow):
+- Reply ONLY in: ${replyLang}
+- If customer uses English → English. Roman Urdu/Urdu → that. If they ask to switch language, switch immediately and stay there.
+- Never answer English questions in Urdu.
 
-RULES:
-- ONLY use DASHBOARD_PRODUCTS for names, prices, categories, sizes. Never invent.
-- If catalog empty, say so. Do not fake orders.
-- Use SHOP_NOTES and WALLET_NUMBERS. For Easypaisa/JazzCash, share the shop number.
-- Use PENDING_ORDER to continue; never restart unless they start a new order.
-- Photos/captions are sent by the system. NEVER write "photo bhej raha hoon" / "sending photo" / long full descriptions.
-- Keep replies short (1-6 lines). Do not paste the whole catalog unless they asked for products/catalog/category.
-- Thanks / ok / theek: brief reply only. Do not resend greeting or catalog.
-- Conversation already has ${historyTurns} messages. Do not greet again unless they greeted you.
-- If a product has sizes, ask size and save parsed_order.products[].variant like "Size 8".
-- Collect ticket: items+qty+size(if any), name, address, payment. Confirm with yes.
-- should_create_order=true only when those fields are present AND customer confirmed.
-- send_photos=true only for catalog/photos/product asks — not for thanks/ok/language requests.
+CATALOG BRAIN:
+- DASHBOARD_PRODUCTS is the ONLY truth. Each item has number n (1,2,3...).
+- If customer asks "do you have shoes / shoes hain?" check category/name. If yes, list matching items with numbers. If NO matching product, clearly say it is NOT available in the shop dashboard — do not invent.
+- If customer replies with only a number like "2", that means catalog item #2 from your last list / DASHBOARD_PRODUCTS n=2.
+- When listing, use: 1) Name — Rs.price (short). Keep description short.
+- send_photos=true when showing products they asked about.
+
+CONVERSATION:
+- Free chat like a human. Answer the exact question. Do not restart with a menu dump.
+- Do not say "Main madad kar sakta hoon" + full catalog unless they asked what you can do.
+- Thanks/ok → short ack only.
+- Never write "sending photo" / "photo bhej raha hoon".
+- Sizes required when product has sizes → ask and save variant "Size 8".
+- Cancel order requests → intent human_handoff, needs_human=true, be polite, say team will handle on dashboard.
+- Order ticket: items+qty+size, name, address, payment. Confirm with yes before should_create_order=true.
+- History has ${historyTurns} messages — continue context, don't re-greet.
 
 Return ONLY JSON:
-{"reply":"string","intent":"greeting|product_inquiry|place_order|confirm_order|order_status|general|human_handoff","should_create_order":false,"send_photos":false,"photo_product_names":[],"needs_human":false,"parsed_order":{"customer_name":null,"phone":null,"address":null,"payment_method":null,"products":[{"name":"","quantity":1,"variant":null}],"notes":null}}`;
+{"reply":"string","intent":"greeting|product_inquiry|place_order|confirm_order|cancel_order|order_status|general|human_handoff","should_create_order":false,"send_photos":false,"photo_product_names":[],"needs_human":false,"parsed_order":{"customer_name":null,"phone":null,"address":null,"payment_method":null,"products":[{"name":"","quantity":1,"variant":null}],"notes":null}}`;
 
   const user = `DASHBOARD_PRODUCTS: ${JSON.stringify(catalogJson)}
 SHOP_NOTES: ${params.instructions || "(none)"}
@@ -314,8 +444,8 @@ LATEST_CUSTOMER_MESSAGE: ${params.message}`;
   const completion = await client.chat.completions.create(
     {
       model,
-      temperature: 0.5,
-      max_tokens: 800,
+      temperature: 0.55,
+      max_tokens: 900,
       response_format: { type: "json_object" },
       messages: [
         { role: "system", content: system },
@@ -323,7 +453,7 @@ LATEST_CUSTOMER_MESSAGE: ${params.message}`;
         { role: "user", content: user },
       ],
     },
-    { timeout: 9000 }
+    { timeout: 14000 }
   );
 
   const raw = completion.choices[0]?.message?.content || "{}";
@@ -363,7 +493,28 @@ LATEST_CUSTOMER_MESSAGE: ${params.message}`;
       }
     : null;
 
-  const pending = mergeOrder(params.pendingOrder, extracted, params.products);
+  // If user picked a number and LLM missed products, inject referred product
+  let pending = mergeOrder(params.pendingOrder, extracted, params.products);
+  if (params.referredProduct && !pending.products.length && /selected catalog|#\d+|^\d+$/i.test(params.message)) {
+    pending = mergeOrder(
+      params.pendingOrder,
+      {
+        customer_name: null,
+        phone: null,
+        address: null,
+        products: [{ name: params.referredProduct.name, quantity: 1, variant: null, unit_price: params.referredProduct.price }],
+        subtotal: null,
+        delivery_fee: null,
+        discount: null,
+        total: null,
+        payment_method: null,
+        payment_status: null,
+        notes: null,
+      },
+      params.products
+    );
+  }
+
   const intent = (["greeting", "place_order", "confirm_order", "cancel_order", "order_status", "product_inquiry", "payment_inquiry", "delivery_inquiry", "general", "human_handoff"].includes(String(parsed.intent))
     ? parsed.intent
     : "general") as AgentIntent;
@@ -371,10 +522,15 @@ LATEST_CUSTOMER_MESSAGE: ${params.message}`;
   const wantPhotos =
     Boolean(parsed.send_photos) ||
     isPhotoRequest(params.message.toLowerCase()) ||
-    (intent === "product_inquiry" && !isSmallTalk(params.message.toLowerCase()));
+    (intent === "product_inquiry" && !isSmallTalk(params.message.toLowerCase())) ||
+    Boolean(params.selectedCategory);
   const photoNames = Array.isArray(parsed.photo_product_names)
     ? (parsed.photo_product_names as unknown[]).map((n) => String(n))
-    : [];
+    : params.referredProduct
+      ? [params.referredProduct.name]
+      : params.selectedCategory
+        ? productsInCategory(params.products || [], params.selectedCategory).map((p) => p.name)
+        : [];
   const send_images = wantPhotos ? imagesForNames(params.products, photoNames) : undefined;
 
   const confirmed = Boolean(parsed.should_create_order);
@@ -382,7 +538,8 @@ LATEST_CUSTOMER_MESSAGE: ${params.message}`;
     pending.products.length > 0 &&
     Boolean(pending.customer_name) &&
     Boolean(pending.address) &&
-    Boolean(pending.payment_method);
+    Boolean(pending.payment_method) &&
+    !nextMissingField(pending, params.products);
 
   return {
     intent,
@@ -390,8 +547,8 @@ LATEST_CUSTOMER_MESSAGE: ${params.message}`;
     parsed_order: pending.products.length || pending.customer_name || pending.address ? pending : extracted,
     should_create_order: confirmed && complete,
     order_id: null,
-    confidence: 0.85,
-    needs_human: intent === "human_handoff" || Boolean(parsed.needs_human),
+    confidence: 0.9,
+    needs_human: intent === "human_handoff" || intent === "cancel_order" || Boolean(parsed.needs_human),
     send_images: send_images?.length ? send_images : undefined,
   };
 }
@@ -424,6 +581,110 @@ function localAgent(params: {
     order_id: null,
     needs_human: false,
   };
+  const en = inferCustomerLanguage(text, params.conversationHistory) === "English";
+
+  if (isCancelRequest(lower)) {
+    return {
+      intent: "human_handoff",
+      reply: en
+        ? "Got it — I've flagged your cancel request. Our team will check the dashboard right away."
+        : "Theek hai — cancel request flag kar di. Team dashboard pe abhi check karegi.",
+      parsed_order: previous.products.length ? previous : null,
+      confidence: 1,
+      should_create_order: false,
+      order_id: null,
+      needs_human: true,
+    };
+  }
+
+  // Number pick / referred product from "2"
+  if (params.referredProduct && /selected catalog|^\d{1,2}$/.test(lower)) {
+    const p = params.referredProduct;
+    const sizes = parseSizeOptions(p.sizes);
+    return {
+      intent: "place_order",
+      reply: en
+        ? `You picked ${p.name} — Rs.${p.price}.${sizes.length ? ` Which size? (${sizes.join(", ")})` : " How many do you want?"}`
+        : `Aap ne ${p.name} choose kiya — Rs.${p.price}.${sizes.length ? ` Size bataein (${sizes.join(", ")})` : " Quantity bataein?"}`,
+      parsed_order: {
+        ...previous,
+        products: [{ name: p.name, quantity: 1, variant: null, unit_price: p.price }],
+        notes: sizes.length ? "size" : previous.customer_name ? previous.notes : "naam",
+      },
+      confidence: 0.95,
+      ...empty,
+    };
+  }
+
+  const cat =
+    params.selectedCategory ||
+    detectCategoryFromMessage(text, params.products);
+  if (cat && !buyAsk && !photoAsk) {
+    const list = productsInCategory(params.products || [], cat);
+    if (!list.length) {
+      return {
+        intent: "product_inquiry",
+        reply: en
+          ? `Sorry — "${cat}" is not available in our dashboard catalog right now.`
+          : `Maazrat — dashboard pe "${cat}" available nahi hai.`,
+        parsed_order: previous.products.length ? previous : null,
+        confidence: 0.95,
+        ...empty,
+        skip_media: true,
+      };
+    }
+    const lines = list
+      .map((p, i) => `${i + 1}) ${p.name} — Rs.${p.price}`)
+      .join("\n");
+    return {
+      intent: "product_inquiry",
+      reply: en
+        ? `Yes, we have ${cat}:\n${lines}\n\nReply with the number (e.g. 1) or the product name.`
+        : `Ji, ${cat} available hain:\n${lines}\n\nNumber likhein (jaise 1) ya product naam.`,
+      parsed_order: previous.products.length ? previous : null,
+      confidence: 0.95,
+      ...empty,
+    };
+  }
+
+  // Asked for a named item that isn't in catalog
+  if (
+    /\b(hai|hain|available|have|stock)\b/.test(lower) &&
+    !namedProduct &&
+    !cat &&
+    (params.products || []).length > 0 &&
+    !isCatalogAsk(lower) &&
+    !isGreeting(lower)
+  ) {
+    const maybe = lower.replace(/[^a-z0-9\s]/gi, " ").trim();
+    if (maybe.length > 2 && !isSmallTalk(lower)) {
+      // only if they mentioned a goods-like word not in catalog
+      const goods = maybe.match(/\b([a-z]{3,})\b/gi) || [];
+      const unknown = goods.find((w) => {
+        const wl = w.toLowerCase();
+        if (["have", "hai", "hain", "available", "stock", "please", "want", "kuch", "kya", "the", "and", "for"].includes(wl))
+          return false;
+        return !(params.products || []).some(
+          (p) =>
+            p.name.toLowerCase().includes(wl) ||
+            (p.category || "").toLowerCase().includes(wl) ||
+            (p.description || "").toLowerCase().includes(wl)
+        );
+      });
+      if (unknown && /shoes?|bag|watch|shirt|suit|phone|laptop|joota/i.test(unknown)) {
+        return {
+          intent: "product_inquiry",
+          reply: en
+            ? `I checked our dashboard — "${unknown}" is not available right now.`
+            : `Dashboard check kiya — "${unknown}" abhi available nahi hai.`,
+          parsed_order: previous.products.length ? previous : null,
+          confidence: 0.85,
+          ...empty,
+          skip_media: true,
+        };
+      }
+    }
+  }
 
   if (isStatsQuery(lower)) {
     const s = params.orderStats;
@@ -609,7 +870,9 @@ function localAgent(params: {
   return {
     intent: "general",
     reply: params.products?.length
-      ? `Main madad kar sakta hoon. Category, catalog, ya product naam likhein. Order ke liye quantity + size (agar ho) bataein.\n\n${catalog}`
+      ? en
+        ? `I can help with products and orders. Ask for a category (e.g. shoes), say "catalog", or type a product name.\n\n${catalog}`
+        : `Main madad kar sakta hoon. Category poochhein (jaise shoes), "catalog" likhein, ya product naam.\n\n${catalog}`
       : emptyCatalogReply(params.businessName),
     parsed_order: previous.products.length ? previous : null,
     confidence: 0.6,
@@ -622,26 +885,39 @@ function inferCustomerLanguage(
   history?: Array<{ role: "user" | "assistant"; content: string }>
 ) {
   const t = message.toLowerCase();
-  if (/english mein|in english|speak english|talk in english|reply in english|english me baat/.test(t)) {
+  if (/english mein|in english|speak english|talk in english|reply in english|english me baat|english please/.test(t)) {
     return "English";
   }
   if (/urdu mein|roman urdu|urdu me baat/.test(t)) {
     return "Roman Urdu";
   }
-  const recent = [...(history || [])].reverse().find((m) => m.role === "user")?.content || "";
-  const sample = `${message} ${recent}`;
+  // Prefer last explicit language preference from history
+  for (const m of [...(history || [])].reverse()) {
+    if (m.role !== "user") continue;
+    const c = m.content.toLowerCase();
+    if (/english mein|in english|speak english|talk in english|reply in english/.test(c)) return "English";
+    if (/urdu mein|roman urdu|urdu me baat/.test(c)) return "Roman Urdu";
+    break;
+  }
+  const recentUsers = (history || []).filter((m) => m.role === "user").slice(-3).map((m) => m.content);
+  const sample = `${message} ${recentUsers.join(" ")}`;
   if (/[\u0600-\u06FF]/.test(sample)) return "Urdu";
   const roman =
-    /\b(hai|hain|kya|chahiye|chahye|krdo|karo|mujhe|mera|apna|shukriya|meherbani|kitna|kitne|dikhao|batao)\b/i.test(
+    /\b(hai|hain|kya|chahiye|chahye|krdo|karo|mujhe|mera|apna|shukriya|meherbani|kitna|kitne|dikhao|batao|acha|theek|ji)\b/i.test(
       sample
     );
   const english =
-    /\b(the|please|want|order|show|thanks|thank you|hello|can you|would|this|that|how much|available)\b/i.test(
+    /\b(the|please|want|order|show|thanks|thank you|hello|hi|can you|would|this|that|how much|available|have|do you|shoes|yes|no)\b/i.test(
       sample
     );
   if (english && !roman) return "English";
-  if (roman) return "Roman Urdu";
-  if (/^[a-z0-9\s.,!?'-]+$/i.test(message.trim()) && message.trim().split(/\s+/).length >= 2) {
+  if (roman && !english) return "Roman Urdu";
+  if (english && roman) {
+    // mixed: lean to whichever words dominate in latest message
+    if (/\b(have|available|please|shoes|want|order|thanks|hello)\b/i.test(t)) return "English";
+    return "Roman Urdu";
+  }
+  if (/^[a-z0-9\s.,!?'"-]+$/i.test(message.trim()) && message.trim().split(/\s+/).length >= 1) {
     return "English";
   }
   return "the same language as the customer message";
