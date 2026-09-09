@@ -16,6 +16,8 @@ type Product = {
   stock: number | null;
   description: string | null;
   image_url: string | null;
+  category: string | null;
+  sizes: string | null;
 };
 
 export default function ProductsPage() {
@@ -68,7 +70,7 @@ export default function ProductsPage() {
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Products</h1>
           <p className="text-sm text-gray-500">
-            Add, edit, delete. Customer “sari tasveerein bhejo” bole to agent photos + price + description bhejega.
+            Category aur sizes (jaise Shoes, 1-10) add karein — WhatsApp agent isi data se poochhega aur order pe save karega.
           </p>
         </div>
         <Button
@@ -98,7 +100,7 @@ export default function ProductsPage() {
             </button>
           </CardHeader>
           <CardContent>
-            <form onSubmit={saveProduct} className="grid gap-4 sm:grid-cols-2">
+            <form key={editing?.id || "new"} onSubmit={saveProduct} className="grid gap-4 sm:grid-cols-2">
               <div className="sm:col-span-2">
                 <Label>Photo</Label>
                 <Input name="image" type="file" accept="image/*" className="mt-1" />
@@ -128,6 +130,24 @@ export default function ProductsPage() {
               <div>
                 <Label>Stock</Label>
                 <Input name="stock" type="number" className="mt-1" defaultValue={editing?.stock ?? ""} />
+              </div>
+              <div>
+                <Label>Category</Label>
+                <Input
+                  name="category"
+                  className="mt-1"
+                  defaultValue={editing?.category ?? ""}
+                  placeholder="Shoes, Suits, Bags"
+                />
+              </div>
+              <div>
+                <Label>Sizes</Label>
+                <Input
+                  name="sizes"
+                  className="mt-1"
+                  defaultValue={editing?.sizes ?? ""}
+                  placeholder="1-10 or 6,7,8,9 or S,M,L"
+                />
               </div>
               <div className="sm:col-span-2">
                 <Label>Description</Label>
@@ -161,7 +181,9 @@ export default function ProductsPage() {
             </div>
             <CardContent className="p-4">
               <p className="font-medium">{p.name}</p>
+              {p.category && <p className="text-xs font-medium text-gray-500">{p.category}</p>}
               <p className="text-lg font-bold text-green-600">{formatCurrency(Number(p.price))}</p>
+              {p.sizes && <p className="mt-1 text-xs text-gray-500">Sizes: {p.sizes}</p>}
               {p.description && <p className="mt-1 text-xs text-gray-500">{p.description}</p>}
               {p.stock != null && <p className="text-xs text-gray-500">Stock: {p.stock}</p>}
               <div className="mt-3 flex gap-2">

@@ -60,6 +60,8 @@ export interface LocalProduct {
   cost: number | null;
   stock: number | null;
   image_url: string | null;
+  category: string | null;
+  sizes: string | null;
   is_active: boolean;
   created_at: string;
 }
@@ -133,6 +135,8 @@ export interface LocalWhatsAppConfig {
   agent_greeting: string;
   agent_instructions: string | null;
   groq_api_key: string | null;
+  easypaisa_number: string | null;
+  jazzcash_number: string | null;
   auto_confirm_orders: boolean;
 }
 

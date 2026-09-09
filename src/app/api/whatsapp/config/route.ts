@@ -21,6 +21,8 @@ function publicConfig(config: LocalWhatsAppConfig) {
     agent_greeting: config.agent_greeting || "",
     has_token: Boolean(config.access_token),
     has_groq_key: Boolean(config.groq_api_key),
+    easypaisa_number: config.easypaisa_number || "",
+    jazzcash_number: config.jazzcash_number || "",
   };
 }
 
@@ -41,6 +43,8 @@ async function ensureConfig(businessId: string) {
         "Assalam o Alaikum! Main aap ki order mein madad kar sakta hoon. Kya order karna chahte hain?",
       agent_instructions: null,
       groq_api_key: null,
+      easypaisa_number: null,
+      jazzcash_number: null,
       auto_confirm_orders: false,
     };
     db.whatsapp_configs.push(config);
@@ -74,6 +78,8 @@ export async function PATCH(request: NextRequest) {
     "agent_greeting",
     "agent_instructions",
     "groq_api_key",
+    "easypaisa_number",
+    "jazzcash_number",
     "auto_confirm_orders",
   ] as const;
   for (const key of allowed) {

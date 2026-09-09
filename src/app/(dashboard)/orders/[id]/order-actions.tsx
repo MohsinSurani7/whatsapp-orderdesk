@@ -42,23 +42,42 @@ export function OrderActions({
     setLoading(false);
   }
 
+  async function deleteOrder() {
+    if (!confirm("Delete this order permanently?")) return;
+    setLoading(true);
+    await fetch(`/api/orders/${orderId}`, { method: "DELETE" });
+    if (!compact) router.push("/orders");
+    router.refresh();
+    setLoading(false);
+  }
+
   if (compact) {
     return (
-      <select
-        value={ORDER_STATUSES.some((s) => s.value === currentStatus) ? currentStatus : "pending"}
-        onChange={(e) => updateStatus(e.target.value)}
-        disabled={loading}
-        className="h-9 max-w-[180px] rounded-lg border border-gray-300 bg-white px-2 text-xs"
-      >
-        {!ORDER_STATUSES.some((s) => s.value === currentStatus) && (
-          <option value={currentStatus}>{currentStatus}</option>
-        )}
-        {ORDER_STATUSES.map((s) => (
-          <option key={s.value} value={s.value}>
-            {s.label}
-          </option>
-        ))}
-      </select>
+      <div className="flex items-center gap-1">
+        <select
+          value={ORDER_STATUSES.some((s) => s.value === currentStatus) ? currentStatus : "pending"}
+          onChange={(e) => updateStatus(e.target.value)}
+          disabled={loading}
+          className="h-9 max-w-[160px] rounded-lg border border-gray-300 bg-white px-2 text-xs"
+        >
+          {!ORDER_STATUSES.some((s) => s.value === currentStatus) && (
+            <option value={currentStatus}>{currentStatus}</option>
+          )}
+          {ORDER_STATUSES.map((s) => (
+            <option key={s.value} value={s.value}>
+              {s.label}
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          disabled={loading}
+          onClick={deleteOrder}
+          className="h-9 rounded-lg border border-red-200 px-2 text-xs text-red-600 hover:bg-red-50"
+        >
+          Delete
+        </button>
+      </div>
     );
   }
 
@@ -77,6 +96,9 @@ export function OrderActions({
             {s.label}
           </Button>
         ))}
+        <Button type="button" size="sm" variant="destructive" disabled={loading} onClick={deleteOrder}>
+          Delete order
+        </Button>
       </div>
       {msg && (
         <p className="flex items-center gap-1 text-xs text-gray-500">

@@ -110,6 +110,8 @@ export async function loadDbFromSupabase(): Promise<DatabaseShape> {
       price: num(p.price),
       cost: p.cost == null ? null : num(p.cost),
       image_url: p.image_url ?? null,
+      category: p.category ?? null,
+      sizes: p.sizes ?? null,
     })) as LocalProduct[],
     orders: (orders.data || []).map((o) => ({
       ...o,
@@ -190,6 +192,8 @@ export async function saveDbToSupabase(db: DatabaseShape) {
     agent_greeting: c.agent_greeting,
     agent_instructions: c.agent_instructions,
     groq_api_key: c.groq_api_key ?? null,
+    easypaisa_number: c.easypaisa_number ?? null,
+    jazzcash_number: c.jazzcash_number ?? null,
     auto_confirm_orders: c.auto_confirm_orders,
   }));
   const conversations = db.conversations.map((c) => ({ ...c }));

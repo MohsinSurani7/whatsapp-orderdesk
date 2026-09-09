@@ -44,6 +44,8 @@ export async function POST(request: NextRequest) {
   const sku = String(form.get("sku") || "") || null;
   const stockRaw = String(form.get("stock") || "");
   const description = String(form.get("description") || "") || null;
+  const category = String(form.get("category") || "") || null;
+  const sizes = String(form.get("sizes") || "") || null;
   const file = form.get("image");
 
   let image_url: string | null = null;
@@ -62,6 +64,8 @@ export async function POST(request: NextRequest) {
     cost: null,
     stock: stockRaw ? parseInt(stockRaw, 10) : null,
     image_url,
+    category,
+    sizes,
     is_active: true,
     created_at: nowIso(),
   });

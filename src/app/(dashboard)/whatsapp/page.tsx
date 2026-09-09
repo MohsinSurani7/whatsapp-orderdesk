@@ -112,8 +112,28 @@ export default function WhatsAppAgentPage() {
               className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
             />
             <p className="mt-1 text-xs text-gray-500">
-              Agent ChatGPT ki tarah alag se train nahi hota. Products + ye notes uska knowledge hain.
+              Agent ChatGPT ki tarah alag se train nahi hota. Groq AI har message padhta hai, dashboard products se jawab deta hai, aur customer ki language follow karta hai.
             </p>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <Label>Easypaisa number</Label>
+              <Input
+                defaultValue={String(config?.easypaisa_number ?? "")}
+                onBlur={(e) => saveConfig({ easypaisa_number: e.target.value.trim() })}
+                className="mt-1"
+                placeholder="03xxxxxxxxx"
+              />
+            </div>
+            <div>
+              <Label>JazzCash number</Label>
+              <Input
+                defaultValue={String(config?.jazzcash_number ?? "")}
+                onBlur={(e) => saveConfig({ jazzcash_number: e.target.value.trim() })}
+                className="mt-1"
+                placeholder="03xxxxxxxxx"
+              />
+            </div>
           </div>
         </CardContent>
       </Card>

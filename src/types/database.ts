@@ -102,6 +102,8 @@ export interface Product {
   price: number;
   cost: number | null;
   stock: number | null;
+  category: string | null;
+  sizes: string | null;
   is_active: boolean;
   created_at: string;
 }
@@ -145,7 +147,7 @@ export interface WhatsAppMessage {
   business_id: string;
   conversation_id: string;
   direction: "inbound" | "outbound";
-  message_type: "text" | "image" | "document" | "template";
+  message_type: "text" | "image" | "document" | "template" | "audio" | "interactive";
   content: string;
   whatsapp_message_id: string | null;
   metadata: Record<string, unknown> | null;
@@ -179,5 +181,18 @@ export interface AgentResponse {
   order_id: string | null;
   confidence: number;
   needs_human: boolean;
-  send_images?: Array<{ path: string; caption: string; productName?: string }>;
+  send_images?: Array<{
+    path: string;
+    caption: string;
+    productName?: string;
+    productId?: string;
+    seeMore?: boolean;
+  }>;
+  quick_replies?: Array<{ id: string; title: string }>;
+  list_menu?: {
+    body: string;
+    button: string;
+    rows: Array<{ id: string; title: string; description?: string }>;
+  };
+  skip_media?: boolean;
 }

@@ -65,7 +65,7 @@ export default async function OrdersPage() {
                       </td>
                       <td className="px-4 py-4 text-xs text-gray-600">
                         {items.length
-                          ? items.map((i) => `${i.quantity}x ${i.product_name}`).join(", ")
+                          ? items.map((i) => `${i.quantity}x ${i.product_name}${i.variant ? ` (${i.variant})` : ""}`).join(", ")
                           : "—"}
                       </td>
                       <td className="px-4 py-4">{formatCurrency(Number(order.total), business.currency)}</td>

@@ -43,6 +43,8 @@ export async function PATCH(
   const sku = form.get("sku");
   const stock = form.get("stock");
   const description = form.get("description");
+  const category = form.get("category");
+  const sizes = form.get("sizes");
   const file = form.get("image");
 
   if (typeof name === "string" && name.trim()) product.name = name.trim();
@@ -50,6 +52,8 @@ export async function PATCH(
   if (sku !== null) product.sku = String(sku) || null;
   if (stock !== null) product.stock = String(stock) ? parseInt(String(stock), 10) : null;
   if (description !== null) product.description = String(description) || null;
+  if (category !== null) product.category = String(category) || null;
+  if (sizes !== null) product.sizes = String(sizes) || null;
 
   if (file instanceof File && file.size > 0) {
     product.image_url = await saveImage(file);

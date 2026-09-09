@@ -1,5 +1,13 @@
 import { processAgentMessage } from "@/lib/ai/agent";
-import { sendWhatsAppText, sendWhatsAppImage, markMessageAsRead } from "@/lib/whatsapp/client";
+import { transcribeWhatsAppAudio } from "@/lib/ai/transcribe";
+import {
+  sendWhatsAppText,
+  sendWhatsAppImage,
+  sendWhatsAppButtons,
+  sendWhatsAppList,
+  markMessageAsRead,
+  downloadWhatsAppMedia,
+} from "@/lib/whatsapp/client";
 import { resolveWhatsAppAuth } from "@/lib/whatsapp/credentials";
 import { isSupabaseEnabled } from "@/lib/db/supabase-sync";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -11,7 +19,7 @@ import {
   writeDb,
   type LocalConversation,
 } from "@/lib/db/store";
-import type { ParsedOrderData } from "@/types/database";
+import type { AgentResponse, ParsedOrderData } from "@/types/database";
 
 interface WebhookMessage {
   from: string;
@@ -20,6 +28,13 @@ interface WebhookMessage {
   text?: { body: string };
   context?: { id?: string; from?: string };
   image?: { caption?: string; id?: string };
+  audio?: { id?: string; mime_type?: string };
+  voice?: { id?: string; mime_type?: string };
+  interactive?: {
+    type?: string;
+    button_reply?: { id?: string; title?: string };
+    list_reply?: { id?: string; title?: string };
+  };
 }
 
 interface WebhookEntry {
@@ -54,14 +69,9 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
       const agentOn = config.agent_enabled !== false;
 
       for (const msg of messages) {
-        const textBody =
-          msg.type === "text"
-            ? msg.text?.body
-            : msg.type === "image"
-              ? msg.image?.caption || "[photo]"
-              : "";
-        if (msg.type !== "text" && msg.type !== "image") continue;
-        if (msg.type === "text" && !textBody) continue;
+        const inbound = await resolveInboundText(msg, auth.accessToken, config.groq_api_key);
+        if (!inbound) continue;
+        const textBody = inbound.text;
 
         if (accessToken && phoneNumberId) {
           await markMessageAsRead(phoneNumberId, accessToken, msg.id).catch((err) => {
@@ -127,7 +137,14 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
           business_id: business.id,
           conversation_id: conversation.id,
           direction: "inbound",
-          message_type: msg.type === "image" ? "image" : "text",
+          message_type:
+            msg.type === "image"
+              ? "image"
+              : msg.type === "audio" || msg.type === "voice"
+                ? "audio"
+                : msg.type === "interactive"
+                  ? "interactive"
+                  : "text",
           content: inboundText,
           whatsapp_message_id: msg.id,
           image_url: null,
@@ -159,10 +176,13 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
         const products = db.products
           .filter((p) => p.business_id === business.id && p.is_active)
           .map((p) => ({
+            id: p.id,
             name: p.name,
             price: p.price,
             description: p.description || undefined,
             image_url: p.image_url,
+            category: p.category,
+            sizes: p.sizes,
           }));
 
         const referredProduct = await resolveReferredProduct({
@@ -189,6 +209,10 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
           instructions: config.agent_instructions || config.agent_greeting,
           referredProduct,
           groqApiKey: config.groq_api_key,
+          easypaisaNumber: config.easypaisa_number,
+          jazzcashNumber: config.jazzcash_number,
+          selectedCategory: inbound.category,
+          seeMoreProductId: inbound.seeMoreId,
           orderStats: {
             total: bizOrders.length,
             delivered: bizOrders.filter((o) => o.order_status === "delivered").length,
@@ -233,64 +257,220 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
         }
 
         try {
-          const sent = await sendWhatsAppText({
+          await sendAgentOutbound({
             phoneNumberId,
             accessToken,
-            to: customerPhone,
-            message: replyText,
+            customerPhone,
+            businessId: business.id,
+            conversationId: conversation.id,
+            replyText,
+            agentResponse,
           });
-          const latest = await readDb();
-          latest.messages.push({
-            id: uid(),
-            business_id: business.id,
-            conversation_id: conversation.id,
-            direction: "outbound",
-            message_type: "text",
-            content: replyText,
-            whatsapp_message_id: sent?.messages?.[0]?.id ?? null,
-            image_url: null,
-            created_at: nowIso(),
-          });
-          const conv = latest.conversations.find((c) => c.id === conversation!.id);
-          if (conv) conv.last_message_at = nowIso();
-          await writeDb(latest);
-
-          const publicBase = (process.env.NEXT_PUBLIC_APP_URL || "").replace(/\/$/, "");
-          const images = agentResponse.send_images || [];
-          for (const img of images.slice(0, 10)) {
-            const absolute = img.path.startsWith("http") ? img.path : `${publicBase}${img.path}`;
-            if (!absolute.startsWith("https://")) continue;
-            try {
-              const imgSent = await sendWhatsAppImage({
-                phoneNumberId,
-                accessToken,
-                to: customerPhone,
-                imageUrl: absolute,
-                caption: img.caption,
-              });
-              const after = await readDb();
-              after.messages.push({
-                id: uid(),
-                business_id: business.id,
-                conversation_id: conversation.id,
-                direction: "outbound",
-                message_type: "image",
-                content: img.caption,
-                whatsapp_message_id: imgSent?.messages?.[0]?.id ?? null,
-                image_url: img.path,
-                product_name: img.productName || img.caption.split(" — ")[0] || null,
-                created_at: nowIso(),
-              });
-              await writeDb(after);
-            } catch (imgErr) {
-              console.error("WhatsApp image send failed:", imgErr);
-            }
-          }
         } catch (error) {
           console.error("WhatsApp send failed:", error);
           await recordWhatsAppError(business.id, String(error));
         }
       }
+    }
+  }
+}
+
+async function resolveInboundText(
+  msg: WebhookMessage,
+  accessToken: string | null,
+  groqKey: string | null
+): Promise<{ text: string; category: string | null; seeMoreId: string | null } | null> {
+  if (msg.type === "text") {
+    const body = msg.text?.body?.trim();
+    if (!body) return null;
+    return { text: body, category: null, seeMoreId: null };
+  }
+  if (msg.type === "image") {
+    return { text: msg.image?.caption || "[photo]", category: null, seeMoreId: null };
+  }
+  if (msg.type === "interactive") {
+    const id = msg.interactive?.button_reply?.id || msg.interactive?.list_reply?.id || "";
+    const title = msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title || "";
+    if (id.startsWith("more:")) {
+      return { text: title || "see more", category: null, seeMoreId: id.slice(5) };
+    }
+    if (id.startsWith("cat:")) {
+      const cat = id.slice(4);
+      return {
+        text: cat === "all" ? "show catalog" : `show ${cat} category`,
+        category: cat === "all" ? null : cat,
+        seeMoreId: null,
+      };
+    }
+    if (id === "menu:catalog") return { text: "show catalog", category: null, seeMoreId: null };
+    if (id === "menu:order") return { text: "I want to place an order", category: null, seeMoreId: null };
+    if (id === "menu:pay") return { text: "payment methods", category: null, seeMoreId: null };
+    return { text: title || id || "ok", category: null, seeMoreId: null };
+  }
+  if (msg.type === "audio" || msg.type === "voice") {
+    const mediaId = msg.audio?.id || msg.voice?.id;
+    if (!mediaId || !accessToken) {
+      return { text: "[voice message]", category: null, seeMoreId: null };
+    }
+    try {
+      const file = await downloadWhatsAppMedia(accessToken, mediaId);
+      const spoken = await transcribeWhatsAppAudio({
+        groqApiKey: groqKey,
+        bytes: file.bytes,
+        mimeType: msg.audio?.mime_type || msg.voice?.mime_type || file.mimeType,
+      });
+      return { text: spoken || "[voice message]", category: null, seeMoreId: null };
+    } catch (err) {
+      console.error("Voice transcribe failed:", err);
+      return { text: "[voice message]", category: null, seeMoreId: null };
+    }
+  }
+  return null;
+}
+
+async function storeOutbound(params: {
+  businessId: string;
+  conversationId: string;
+  content: string;
+  messageType: string;
+  whatsappId?: string | null;
+  imageUrl?: string | null;
+  productName?: string | null;
+}) {
+  const db = await readDb();
+  db.messages.push({
+    id: uid(),
+    business_id: params.businessId,
+    conversation_id: params.conversationId,
+    direction: "outbound",
+    message_type: params.messageType,
+    content: params.content,
+    whatsapp_message_id: params.whatsappId ?? null,
+    image_url: params.imageUrl ?? null,
+    product_name: params.productName ?? null,
+    created_at: nowIso(),
+  });
+  const conv = db.conversations.find((c) => c.id === params.conversationId);
+  if (conv) conv.last_message_at = nowIso();
+  await writeDb(db);
+}
+
+async function sendAgentOutbound(params: {
+  phoneNumberId: string;
+  accessToken: string;
+  customerPhone: string;
+  businessId: string;
+  conversationId: string;
+  replyText: string;
+  agentResponse: AgentResponse;
+}) {
+  const { phoneNumberId, accessToken, customerPhone } = params;
+  const buttons = params.agentResponse.quick_replies?.slice(0, 3) || [];
+  let sentText = false;
+  if (buttons.length && params.replyText.trim()) {
+    try {
+      const sent = await sendWhatsAppButtons({
+        phoneNumberId,
+        accessToken,
+        to: customerPhone,
+        body: params.replyText,
+        buttons,
+      });
+      await storeOutbound({
+        businessId: params.businessId,
+        conversationId: params.conversationId,
+        content: params.replyText,
+        messageType: "interactive",
+        whatsappId: sent?.messages?.[0]?.id ?? null,
+      });
+      sentText = true;
+    } catch (err) {
+      console.error("WhatsApp buttons failed, sending text:", err);
+    }
+  }
+  if (!sentText) {
+    const sent = await sendWhatsAppText({
+      phoneNumberId,
+      accessToken,
+      to: customerPhone,
+      message: params.replyText,
+    });
+    await storeOutbound({
+      businessId: params.businessId,
+      conversationId: params.conversationId,
+      content: params.replyText,
+      messageType: "text",
+      whatsappId: sent?.messages?.[0]?.id ?? null,
+    });
+  }
+
+  const list = params.agentResponse.list_menu;
+  if (list?.rows?.length) {
+    try {
+      const sent = await sendWhatsAppList({
+        phoneNumberId,
+        accessToken,
+        to: customerPhone,
+        body: list.body,
+        button: list.button,
+        rows: list.rows,
+      });
+      await storeOutbound({
+        businessId: params.businessId,
+        conversationId: params.conversationId,
+        content: list.body,
+        messageType: "interactive",
+        whatsappId: sent?.messages?.[0]?.id ?? null,
+      });
+    } catch (err) {
+      console.error("WhatsApp list failed:", err);
+    }
+  }
+
+  const publicBase = (process.env.NEXT_PUBLIC_APP_URL || "").replace(/\/$/, "");
+  for (const img of (params.agentResponse.send_images || []).slice(0, 10)) {
+    const absolute = img.path.startsWith("http") ? img.path : `${publicBase}${img.path}`;
+    if (!absolute.startsWith("https://")) continue;
+    try {
+      const imgSent = await sendWhatsAppImage({
+        phoneNumberId,
+        accessToken,
+        to: customerPhone,
+        imageUrl: absolute,
+        caption: img.caption,
+      });
+      await storeOutbound({
+        businessId: params.businessId,
+        conversationId: params.conversationId,
+        content: img.caption,
+        messageType: "image",
+        whatsappId: imgSent?.messages?.[0]?.id ?? null,
+        imageUrl: img.path,
+        productName: img.productName || null,
+      });
+      if (img.seeMore && img.productId) {
+        try {
+          const more = await sendWhatsAppButtons({
+            phoneNumberId,
+            accessToken,
+            to: customerPhone,
+            body: `${img.productName || "Product"} — more details?`,
+            buttons: [{ id: `more:${img.productId}`, title: "See more" }],
+          });
+          await storeOutbound({
+            businessId: params.businessId,
+            conversationId: params.conversationId,
+            content: "See more",
+            messageType: "interactive",
+            whatsappId: more?.messages?.[0]?.id ?? null,
+            productName: img.productName || null,
+          });
+        } catch (btnErr) {
+          console.error("See more button failed:", btnErr);
+        }
+      }
+    } catch (imgErr) {
+      console.error("WhatsApp image send failed:", imgErr);
     }
   }
 }

@@ -72,6 +72,8 @@ export async function POST(request: NextRequest) {
         "Assalam o Alaikum! Main aap ki order mein madad kar sakta hoon. Kya order karna chahte hain?",
       agent_instructions: null,
       groq_api_key: null,
+      easypaisa_number: null,
+      jazzcash_number: null,
       auto_confirm_orders: false,
     });
   }

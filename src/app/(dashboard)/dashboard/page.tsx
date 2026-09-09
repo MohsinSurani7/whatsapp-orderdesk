@@ -8,6 +8,7 @@ import { formatCurrency } from "@/lib/utils";
 import { inspectWhatsAppToken, resolveWhatsAppAuth } from "@/lib/whatsapp/credentials";
 import { Bot, MessageCircle, Plus, ShoppingBag, Users, TrendingUp } from "lucide-react";
 import { format } from "date-fns";
+import { isCompletedSale } from "@/lib/catalog";
 
 export default async function DashboardPage() {
   const { businessId, business } = await requireBusiness();
@@ -27,7 +28,9 @@ export default async function DashboardPage() {
   const activeConversations = db.conversations.filter(
     (c) => c.business_id === businessId && c.status === "active"
   ).length;
-  const todaySales = ordersToday.reduce((sum, o) => sum + Number(o.total), 0);
+  const todaySales = ordersToday
+    .filter((o) => isCompletedSale(o.order_status))
+    .reduce((sum, o) => sum + Number(o.total), 0);
   const attention = db.notifications
     .filter((n) => n.business_id === businessId && !n.read && (n.type === "attention" || n.type === "error"))
     .sort((a, b) => b.created_at.localeCompare(a.created_at))
@@ -35,7 +38,7 @@ export default async function DashboardPage() {
   const needsYou = db.conversations.filter((c) => c.business_id === businessId && c.status === "handed_off");
 
   const stats = [
-    { label: "Today's Sales", value: formatCurrency(todaySales, business.currency), icon: TrendingUp, color: "text-green-600" },
+    { label: "Completed sales", value: formatCurrency(todaySales, business.currency), icon: TrendingUp, color: "text-green-600" },
     { label: "Orders Today", value: ordersToday.length, icon: ShoppingBag, color: "text-blue-600" },
     { label: "Pending Orders", value: pendingOrders, icon: ShoppingBag, color: "text-yellow-600" },
     { label: "Active Chats", value: activeConversations, icon: MessageCircle, color: "text-green-600" },
@@ -46,7 +49,7 @@ export default async function DashboardPage() {
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
-          <p className="text-sm text-gray-500">Welcome back, {business.name}</p>
+          <p className="text-sm text-gray-500">Welcome back, {business.name}. Sales count only delivered orders.</p>
         </div>
         <Link href="/orders/new">
           <Button><Plus size={16} /> Create Order</Button>

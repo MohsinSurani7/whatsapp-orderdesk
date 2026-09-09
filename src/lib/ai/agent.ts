@@ -1,12 +1,17 @@
 import OpenAI from "openai";
 import type { AgentIntent, AgentResponse, ParsedOrderData, PaymentStatus } from "@/types/database";
+import {
+  catalogSummary,
+  formatProductCard,
+  needsSeeMore,
+  parseSizeOptions,
+  productsInCategory,
+  stripPhotoTalk,
+  uniqueCategories,
+  type ShopProduct,
+} from "@/lib/catalog";
 
-type CatalogProduct = {
-  name: string;
-  price: number;
-  description?: string;
-  image_url?: string | null;
-};
+type CatalogProduct = ShopProduct;
 
 type OrderStats = {
   total: number;
@@ -27,6 +32,10 @@ type AgentParams = {
   referredProduct?: CatalogProduct | null;
   groqApiKey?: string | null;
   orderStats?: OrderStats;
+  easypaisaNumber?: string | null;
+  jazzcashNumber?: string | null;
+  selectedCategory?: string | null;
+  seeMoreProductId?: string | null;
 };
 
 function looksLikeRealKey(key?: string) {
@@ -67,12 +76,34 @@ function getAIClient(shopGroqKey?: string | null): { client: OpenAI; model: stri
 }
 
 export async function processAgentMessage(params: AgentParams): Promise<AgentResponse> {
+  if (params.seeMoreProductId) {
+    const hit =
+      (params.products || []).find((p) => p.id === params.seeMoreProductId) ||
+      findProductInText(params.seeMoreProductId.toLowerCase(), params.products);
+    if (hit) {
+      return withShopMenus(
+        {
+          intent: "product_inquiry",
+          reply: formatProductCard(hit, { full: true }),
+          parsed_order: null,
+          should_create_order: false,
+          order_id: null,
+          confidence: 1,
+          needs_human: false,
+          skip_media: true,
+        },
+        params
+      );
+    }
+  }
+
   const ai = getAIClient(params.groqApiKey);
   let result: AgentResponse;
   if (ai) {
     try {
       const llm = await llmAgent(ai.client, ai.model, params);
-      result = llm.reply.trim() ? llm : localAgent(params);
+      if (!llm.reply.trim()) throw new Error("Empty Groq reply");
+      result = llm;
     } catch (error) {
       console.error("LLM agent failed, falling back to local rules:", error);
       result = localAgent(params);
@@ -80,7 +111,12 @@ export async function processAgentMessage(params: AgentParams): Promise<AgentRes
   } else {
     result = localAgent(params);
   }
+  result = {
+    ...result,
+    reply: stripPhotoTalk(result.reply),
+  };
   result = attachProductMedia(result, params);
+  result = withShopMenus(result, params);
   if (needsStaffAttention(params.message) || result.intent === "human_handoff") {
     result = {
       ...result,
@@ -91,47 +127,76 @@ export async function processAgentMessage(params: AgentParams): Promise<AgentRes
   return result;
 }
 
-function formatProductCard(p: CatalogProduct) {
-  return [
-    `📦 *${p.name}*`,
-    `💰 Price: Rs.${p.price}`,
-    p.description ? `📝 ${p.description}` : null,
-    p.image_url ? "📷 Photo neeche bhej raha hoon" : null,
-  ]
-    .filter(Boolean)
-    .join("\n");
-}
-
-function catalogCardsText(products: CatalogProduct[]) {
-  return products.slice(0, 8).map(formatProductCard).join("\n\n");
+function withShopMenus(result: AgentResponse, params: AgentParams): AgentResponse {
+  const products = params.products || [];
+  const cats = uniqueCategories(products);
+  const quick = result.quick_replies?.length
+    ? result.quick_replies
+    : [
+        { id: "menu:catalog", title: "Catalog" },
+        { id: "menu:order", title: "Order" },
+        { id: "menu:pay", title: "Payment" },
+      ];
+  const list =
+    result.list_menu ||
+    (cats.length
+      ? {
+          body: "Category choose karein:",
+          button: "Categories",
+          rows: [
+            { id: "cat:all", title: "All products", description: "Poori list" },
+            ...cats.slice(0, 9).map((c) => ({
+              id: `cat:${c}`,
+              title: c.slice(0, 24),
+              description: `${productsInCategory(products, c).length} items`,
+            })),
+          ],
+        }
+      : undefined);
+  const showMenus =
+    !result.skip_media &&
+    (result.intent === "greeting" ||
+      result.intent === "product_inquiry" ||
+      Boolean(params.selectedCategory) ||
+      isCatalogAsk(params.message.toLowerCase()));
+  return {
+    ...result,
+    quick_replies: showMenus && !result.skip_media ? quick : result.quick_replies,
+    list_menu: showMenus && !result.skip_media ? list : result.list_menu,
+  };
 }
 
 function attachProductMedia(result: AgentResponse, params: AgentParams): AgentResponse {
+  if (result.skip_media) return result;
   const products = params.products || [];
   if (!products.length) return result;
   const lower = params.message.toLowerCase();
-  const named = findProductInText(lower, products);
+  const named = findProductInText(lower, products) || params.referredProduct || null;
+  const categoryPick = params.selectedCategory
+    ? productsInCategory(products, params.selectedCategory)
+    : [];
   const show =
+    Boolean(params.selectedCategory) ||
     result.intent === "product_inquiry" ||
-    result.intent === "greeting" ||
     isCatalogAsk(lower) ||
     isPhotoRequest(lower) ||
     Boolean(result.send_images?.length);
   if (!show) return result;
 
-  const pick = named ? [named] : products.slice(0, 8);
+  const pick = named ? [named] : categoryPick.length ? categoryPick.slice(0, 8) : products.slice(0, 8);
   const images = pick
     .filter((p) => p.image_url)
     .map((p) => ({
       path: p.image_url as string,
       caption: formatProductCard(p),
       productName: p.name,
+      productId: p.id,
+      seeMore: needsSeeMore(p.description),
     }));
-  const cards = catalogCardsText(pick);
-  const alreadyRich = /\*/.test(result.reply) && /Rs\./.test(result.reply);
+  const shortIntro = stripPhotoTalk(result.reply);
   return {
     ...result,
-    reply: alreadyRich ? result.reply : `${result.reply.trim()}\n\n${cards}`,
+    reply: shortIntro,
     send_images: images.length ? images : result.send_images,
   };
 }
@@ -147,12 +212,7 @@ function needsStaffAttention(message: string) {
 
 function catalogLine(products?: CatalogProduct[]) {
   if (!products?.length) return "";
-  return products
-    .map((p, i) => {
-      const desc = p.description ? `\n   ${p.description}` : "";
-      return `${i + 1}) ${p.name} — Rs.${p.price}${desc}`;
-    })
-    .join("\n");
+  return catalogSummary(products, 8);
 }
 
 function emptyCatalogReply(businessName: string) {
@@ -162,7 +222,7 @@ function emptyCatalogReply(businessName: string) {
 function catalogReply(businessName: string, products?: CatalogProduct[]) {
   const catalog = catalogLine(products);
   if (!catalog) return emptyCatalogReply(businessName);
-  return `${businessName} ke available products:\n${catalog}\n\nJo lena ho naam + quantity likhein (jaise "2x Cotton Suit"). Photos sath bhej raha hoon.`;
+  return `${businessName} ke products:\n${catalog}\n\nJo lena ho naam + quantity likhein. Size wale item pe size bhi bata dein.`;
 }
 
 function imagesForNames(products: CatalogProduct[] | undefined, names: string[]) {
@@ -182,48 +242,71 @@ function imagesForNames(products: CatalogProduct[] | undefined, names: string[])
     .slice(0, 10)
     .map((p) => ({
       path: p.image_url as string,
-      caption: [p.name, `Rs.${p.price}`, p.description].filter(Boolean).join(" — "),
+      caption: formatProductCard(p),
       productName: p.name,
+      productId: p.id,
+      seeMore: needsSeeMore(p.description),
     }));
 }
 
 async function llmAgent(client: OpenAI, model: string, params: AgentParams): Promise<AgentResponse> {
   const catalog = params.products || [];
   const catalogJson = catalog.map((p) => ({
+    id: p.id,
     name: p.name,
     price: p.price,
-    description: p.description || "",
+    category: p.category || "",
+    sizes: parseSizeOptions(p.sizes),
+    description_short: (p.description || "").slice(0, 90),
     has_photo: Boolean(p.image_url),
   }));
   const stats = params.orderStats;
-  const system = `You are ${params.agentName}, WhatsApp sales assistant for "${params.businessName}" (Pakistan shop).
-Talk like a real helpful shop person: natural Roman Urdu + simple English. Friendly, free conversation, satisfy the customer. Not a robot menu.
+  const wallets = [
+    params.easypaisaNumber ? `Easypaisa: ${params.easypaisaNumber}` : null,
+    params.jazzcashNumber ? `JazzCash: ${params.jazzcashNumber}` : null,
+  ]
+    .filter(Boolean)
+    .join(" | ");
+  const historyTurns = (params.conversationHistory || []).length;
+  const replyLang = inferCustomerLanguage(params.message, params.conversationHistory);
+  const system = `You are ${params.agentName}, a live WhatsApp sales agent for "${params.businessName}".
+Read LATEST_CUSTOMER_MESSAGE carefully, understand intent, then reply like a real human shopkeeper.
+
+LANGUAGE (critical):
+- Reply in ${replyLang}.
+- If the customer writes English, reply in English. If they write Roman Urdu/Urdu, reply in that.
+- If they say "talk in English" / "English mein baat karo" (or Urdu), SWITCH and stay in that language.
+- Never force Urdu when they used English. Never dump a canned first greeting.
 
 RULES:
-- ONLY use products in DASHBOARD_PRODUCTS. Never invent items or prices.
-- If DASHBOARD_PRODUCTS is empty, honestly say catalog empty; malik must add products in dashboard. Do not take fake orders.
-- Use SHOP_NOTES for delivery charges, COD, timings, policies.
-- Use PENDING_ORDER to continue the same order (don't restart unless customer wants new order).
-- When showing products (greeting, list, details, "kya hai"), ALWAYS describe each item clearly: name, price Rs., description. Photos are sent automatically — set send_photos=true and photo_product_names to those product names. Do not tell the user to type "photo bhejo".
-- If customer is abusive, threatening, asking for a human, or the request is outside selling (scam/illegal), set intent to human_handoff, stay polite, say a team member will check the dashboard, and do not argue.
-- Collect a COMPLETE order ticket for the shop dashboard: items+qty+price, customer full name, WhatsApp/phone, full delivery address, payment method.
-- Collect step by step: items+qty, then naam, then address, then payment (COD/Easypaisa/JazzCash), then ask to confirm with "yes".
-- Put every collected field into parsed_order every turn (carry forward PENDING_ORDER).
-- should_create_order=true ONLY when items, naam, address, payment are all present AND customer confirmed.
-- Keep WhatsApp replies useful, not empty. 4-12 lines is OK when listing products.
+- ONLY use DASHBOARD_PRODUCTS for names, prices, categories, sizes. Never invent.
+- If catalog empty, say so. Do not fake orders.
+- Use SHOP_NOTES and WALLET_NUMBERS. For Easypaisa/JazzCash, share the shop number.
+- Use PENDING_ORDER to continue; never restart unless they start a new order.
+- Photos/captions are sent by the system. NEVER write "photo bhej raha hoon" / "sending photo" / long full descriptions.
+- Keep replies short (1-6 lines). Do not paste the whole catalog unless they asked for products/catalog/category.
+- Thanks / ok / theek: brief reply only. Do not resend greeting or catalog.
+- Conversation already has ${historyTurns} messages. Do not greet again unless they greeted you.
+- If a product has sizes, ask size and save parsed_order.products[].variant like "Size 8".
+- Collect ticket: items+qty+size(if any), name, address, payment. Confirm with yes.
+- should_create_order=true only when those fields are present AND customer confirmed.
+- send_photos=true only for catalog/photos/product asks — not for thanks/ok/language requests.
 
 Return ONLY JSON:
-{"reply":"string","intent":"greeting|product_inquiry|place_order|confirm_order|order_status|general|human_handoff","should_create_order":false,"send_photos":true,"photo_product_names":[],"needs_human":false,"parsed_order":{"customer_name":null,"phone":null,"address":null,"payment_method":null,"products":[{"name":"","quantity":1}],"notes":null}}`;
+{"reply":"string","intent":"greeting|product_inquiry|place_order|confirm_order|order_status|general|human_handoff","should_create_order":false,"send_photos":false,"photo_product_names":[],"needs_human":false,"parsed_order":{"customer_name":null,"phone":null,"address":null,"payment_method":null,"products":[{"name":"","quantity":1,"variant":null}],"notes":null}}`;
 
   const user = `DASHBOARD_PRODUCTS: ${JSON.stringify(catalogJson)}
 SHOP_NOTES: ${params.instructions || "(none)"}
+WALLET_NUMBERS: ${wallets || "(not set)"}
 CUSTOMER_WHATSAPP_NAME: ${params.customerName || "(unknown)"}
 PENDING_ORDER: ${JSON.stringify(params.pendingOrder || null)}
 REFERRED_PRODUCT: ${params.referredProduct ? JSON.stringify(params.referredProduct) : "null"}
+SELECTED_CATEGORY: ${params.selectedCategory || "null"}
 ORDER_STATS: ${stats ? JSON.stringify(stats) : "null"}
+REPLY_IN: ${replyLang}
 LATEST_CUSTOMER_MESSAGE: ${params.message}`;
 
-  const history = (params.conversationHistory || []).slice(-8).map((m) => ({
+  const history = (params.conversationHistory || []).slice(-16).map((m) => ({
     role: m.role as "user" | "assistant",
     content: m.content,
   }));
@@ -231,8 +314,8 @@ LATEST_CUSTOMER_MESSAGE: ${params.message}`;
   const completion = await client.chat.completions.create(
     {
       model,
-      temperature: 0.4,
-      max_tokens: 700,
+      temperature: 0.5,
+      max_tokens: 800,
       response_format: { type: "json_object" },
       messages: [
         { role: "system", content: system },
@@ -263,10 +346,10 @@ LATEST_CUSTOMER_MESSAGE: ${params.message}`;
         phone: (rawOrder.phone as string) || null,
         address: (rawOrder.address as string) || null,
         products: Array.isArray(rawOrder.products)
-          ? (rawOrder.products as Array<{ name?: string; quantity?: number }>).map((p) => ({
+          ? (rawOrder.products as Array<{ name?: string; quantity?: number; variant?: string | null }>).map((p) => ({
               name: String(p.name || ""),
               quantity: Number(p.quantity) || 1,
-              variant: null,
+              variant: p.variant ? String(p.variant) : null,
               unit_price: null,
             })).filter((p) => p.name)
           : [],
@@ -288,8 +371,7 @@ LATEST_CUSTOMER_MESSAGE: ${params.message}`;
   const wantPhotos =
     Boolean(parsed.send_photos) ||
     isPhotoRequest(params.message.toLowerCase()) ||
-    intent === "product_inquiry" ||
-    intent === "greeting";
+    (intent === "product_inquiry" && !isSmallTalk(params.message.toLowerCase()));
   const photoNames = Array.isArray(parsed.photo_product_names)
     ? (parsed.photo_product_names as unknown[]).map((n) => String(n))
     : [];
@@ -316,6 +398,7 @@ LATEST_CUSTOMER_MESSAGE: ${params.message}`;
 
 function localAgent(params: {
   message: string;
+  conversationHistory?: Array<{ role: "user" | "assistant"; content: string }>;
   pendingOrder?: Record<string, unknown> | null;
   products?: CatalogProduct[];
   customerName?: string | null;
@@ -323,6 +406,9 @@ function localAgent(params: {
   instructions?: string | null;
   referredProduct?: CatalogProduct | null;
   orderStats?: OrderStats;
+  selectedCategory?: string | null;
+  easypaisaNumber?: string | null;
+  jazzcashNumber?: string | null;
 }): AgentResponse {
   const text = params.message.trim();
   const lower = text.toLowerCase();
@@ -398,27 +484,33 @@ function localAgent(params: {
       intent: "product_inquiry",
       reply:
         targets.length > 1
-          ? `Product photos bhej raha hoon (${targets.length}). Jo lena ho us photo pe reply karke quantity likhein, jaise "2x".`
-          : `Photo bhej raha hoon (${targets[0].name}). Agar lena hai to quantity likhein, jaise "2x".`,
+          ? `Yeh photos hain. Jo lena ho uska naam + quantity likhein, size ho to size bhi.`
+          : `${targets[0].name} — Rs.${targets[0].price}. Lena ho to quantity${parseSizeOptions(targets[0].sizes).length ? " aur size" : ""} likhein.`,
       parsed_order: previous.products.length ? previous : null,
       confidence: 0.95,
       ...empty,
       send_images: targets.slice(0, 10).map((p) => ({
         path: p.image_url as string,
-        caption: [p.name, `Rs.${p.price}`, p.description].filter(Boolean).join(" — "),
+        caption: formatProductCard(p),
         productName: p.name,
+        productId: p.id,
+        seeMore: needsSeeMore(p.description),
       })),
     };
   }
 
   if (isGreeting(lower) && !lastAsk && !buyAsk && !photoAsk && !isCatalogAsk(lower)) {
+    const alreadyChatting = (params.conversationHistory || []).length > 1;
     return {
-      intent: "greeting",
-      reply: params.products?.length
-        ? `Assalam o Alaikum! ${params.businessName} mein ye available hai:\n${catalog}\n\nOrder ke liye naam + quantity likhein. Photos sath attached hain.`
-        : emptyCatalogReply(params.businessName),
+      intent: alreadyChatting ? "general" : "greeting",
+      reply: alreadyChatting
+        ? "Ji, boliye — kya chahiye?"
+        : params.products?.length
+          ? `Assalam o Alaikum! ${params.businessName} mein khush amdeed.\nNeeche categories / catalog se choose karein, ya product naam likhein.`
+          : emptyCatalogReply(params.businessName),
       parsed_order: null,
       confidence: 0.9,
+      skip_media: alreadyChatting,
       ...empty,
     };
   }
@@ -494,7 +586,7 @@ function localAgent(params: {
         ...empty,
       };
     }
-    const missing = nextMissingField(priced);
+    const missing = nextMissingField(priced, params.products);
     const lines = formatOrderNote(priced);
     if (missing) {
       return {
@@ -517,12 +609,48 @@ function localAgent(params: {
   return {
     intent: "general",
     reply: params.products?.length
-      ? `Main madad kar sakta hoon.\n• Catalog: "products dikhao"\n• Photos: "photo bhejo"\n• Order: product naam + quantity\n\nAbhi available:\n${catalog}`
+      ? `Main madad kar sakta hoon. Category, catalog, ya product naam likhein. Order ke liye quantity + size (agar ho) bataein.\n\n${catalog}`
       : emptyCatalogReply(params.businessName),
     parsed_order: previous.products.length ? previous : null,
     confidence: 0.6,
     ...empty,
   };
+}
+
+function inferCustomerLanguage(
+  message: string,
+  history?: Array<{ role: "user" | "assistant"; content: string }>
+) {
+  const t = message.toLowerCase();
+  if (/english mein|in english|speak english|talk in english|reply in english|english me baat/.test(t)) {
+    return "English";
+  }
+  if (/urdu mein|roman urdu|urdu me baat/.test(t)) {
+    return "Roman Urdu";
+  }
+  const recent = [...(history || [])].reverse().find((m) => m.role === "user")?.content || "";
+  const sample = `${message} ${recent}`;
+  if (/[\u0600-\u06FF]/.test(sample)) return "Urdu";
+  const roman =
+    /\b(hai|hain|kya|chahiye|chahye|krdo|karo|mujhe|mera|apna|shukriya|meherbani|kitna|kitne|dikhao|batao)\b/i.test(
+      sample
+    );
+  const english =
+    /\b(the|please|want|order|show|thanks|thank you|hello|can you|would|this|that|how much|available)\b/i.test(
+      sample
+    );
+  if (english && !roman) return "English";
+  if (roman) return "Roman Urdu";
+  if (/^[a-z0-9\s.,!?'-]+$/i.test(message.trim()) && message.trim().split(/\s+/).length >= 2) {
+    return "English";
+  }
+  return "the same language as the customer message";
+}
+
+function isSmallTalk(lower: string) {
+  return /^(ok+|okay|theek|theek hai|shukriya|thanks|thank you|ok thank you|ok thanks|jee|ji|acha|nice|great|cool|alright|done thanks)[\s!.]*$/i.test(
+    lower.trim()
+  );
 }
 
 function isPhotoRequest(lower: string) {
@@ -571,10 +699,15 @@ function isCatalogAsk(lower: string) {
   return mentionsGoods && asks;
 }
 
-function isAnsweringDetails(lower: string, text: string, lastAsk: "naam" | "address" | "payment" | null) {
+function isAnsweringDetails(
+  lower: string,
+  text: string,
+  lastAsk: "naam" | "address" | "payment" | "size" | null
+) {
   if (lastAsk === "naam") return !isPhotoRequest(lower) && !isStatsQuery(lower);
   if (lastAsk === "address") return looksLikeAddress(text) || lastAsk === "address";
   if (lastAsk === "payment") return looksLikePayment(text);
+  if (lastAsk === "size") return Boolean(extractSizeToken(text));
   return false;
 }
 
@@ -583,7 +716,7 @@ function formatOrderNote(order: ParsedOrderData) {
     "Order note ho gaya:",
     order.customer_name ? `Name: ${order.customer_name}` : "Name: —",
     order.products.length
-      ? `Items: ${order.products.map((p) => `${p.quantity}x ${p.name}`).join(", ")}`
+      ? `Items: ${order.products.map((p) => `${p.quantity}x ${p.name}${p.variant ? ` (${p.variant})` : ""}`).join(", ")}`
       : null,
     order.total != null ? `Total: Rs.${order.total}` : null,
     order.address ? `Address: ${order.address}` : null,
@@ -593,16 +726,34 @@ function formatOrderNote(order: ParsedOrderData) {
     .join("\n");
 }
 
-function nextMissingField(order: ParsedOrderData): { key: "naam" | "address" | "payment"; prompt: string } | null {
+function nextMissingField(
+  order: ParsedOrderData,
+  catalog?: CatalogProduct[]
+): { key: "naam" | "address" | "payment" | "size"; prompt: string } | null {
+  if (order.products.length) {
+    const missingSize = order.products.find((item) => {
+      const prod = catalog?.find((p) => p.name.toLowerCase() === item.name.toLowerCase());
+      const sizes = parseSizeOptions(prod?.sizes);
+      return sizes.length > 0 && !item.variant;
+    });
+    if (missingSize) {
+      const prod = catalog?.find((p) => p.name.toLowerCase() === missingSize.name.toLowerCase());
+      const sizes = parseSizeOptions(prod?.sizes);
+      return {
+        key: "size",
+        prompt: `${missingSize.name} ka size (${sizes.join(", ")})`,
+      };
+    }
+  }
   if (!order.customer_name) return { key: "naam", prompt: "poora naam (sirf naam, address nahi)" };
   if (!order.address) return { key: "address", prompt: "delivery address" };
   if (!order.payment_method) return { key: "payment", prompt: "payment method (COD / Easypaisa / JazzCash)" };
   return null;
 }
 
-function lastAssistantAsk(pending?: Record<string, unknown> | null): "naam" | "address" | "payment" | null {
+function lastAssistantAsk(pending?: Record<string, unknown> | null): "naam" | "address" | "payment" | "size" | null {
   const notes = String(pending?.notes || "");
-  if (notes === "naam" || notes === "address" || notes === "payment") return notes;
+  if (notes === "naam" || notes === "address" || notes === "payment" || notes === "size") return notes;
   return null;
 }
 
@@ -760,12 +911,35 @@ function mergeOrder(
     notes: (pending?.notes as string) || null,
   };
   if (!extracted) return matchCatalog(base, products);
+  const mergedProducts = extracted.products.length
+    ? extracted.products.map((item) => {
+        const prev = base.products.find((p) => p.name.toLowerCase() === item.name.toLowerCase());
+        return {
+          ...item,
+          quantity: item.quantity || prev?.quantity || 1,
+          variant: item.variant || prev?.variant || null,
+          unit_price: item.unit_price ?? prev?.unit_price ?? null,
+        };
+      })
+    : base.products.map((item) => {
+        const extra = extracted.products.find((p) => p.name.toLowerCase() === item.name.toLowerCase());
+        return extra ? { ...item, variant: extra.variant || item.variant } : item;
+      });
+  if (!extracted.products.length && extracted.notes === null) {
+    const token = extraVariantFromExtracted(extracted);
+    if (token && mergedProducts.length) {
+      mergedProducts[mergedProducts.length - 1] = {
+        ...mergedProducts[mergedProducts.length - 1],
+        variant: mergedProducts[mergedProducts.length - 1].variant || token,
+      };
+    }
+  }
   return matchCatalog(
     {
       customer_name: extracted.customer_name || base.customer_name,
       phone: extracted.phone || base.phone,
       address: extracted.address || base.address,
-      products: extracted.products.length ? extracted.products : base.products,
+      products: mergedProducts,
       subtotal: extracted.subtotal ?? base.subtotal,
       delivery_fee: extracted.delivery_fee ?? base.delivery_fee,
       discount: extracted.discount ?? base.discount,
@@ -776,6 +950,10 @@ function mergeOrder(
     },
     products
   );
+}
+
+function extraVariantFromExtracted(_extracted: ParsedOrderData): string | null {
+  return null;
 }
 
 function matchCatalog(order: ParsedOrderData, products?: CatalogProduct[]): ParsedOrderData {
@@ -801,7 +979,7 @@ function matchCatalog(order: ParsedOrderData, products?: CatalogProduct[]): Pars
 export function parseOrderFromText(
   text: string,
   products?: CatalogProduct[],
-  awaiting: "naam" | "address" | "payment" | null = null,
+  awaiting: "naam" | "address" | "payment" | "size" | null = null,
   referredProduct?: CatalogProduct | null
 ): ParsedOrderData | null {
   const phoneMatch = text.match(/(\+?92|0)?3\d{9}/);
@@ -809,24 +987,26 @@ export function parseOrderFromText(
   const payment = extractPayment(lower);
   const qty = extractQuantity(lower);
   const collectingDetails = awaiting === "naam" || awaiting === "address" || awaiting === "payment";
+  const collectingSize = awaiting === "size";
   const useReferred = Boolean(referredProduct) && (!collectingDetails || qty != null || isPointingAtProduct(lower));
   const chosen = findProductInText(lower, products) || (useReferred ? referredProduct : null);
   const address = extractAddress(text, awaiting === "address");
   const name = extractName(text, awaiting === "naam");
+  const size = extractSizeForProduct(text, chosen, products, collectingSize);
 
   const productsList =
-    chosen && (!collectingDetails || qty != null || isPointingAtProduct(lower))
+    chosen && (!collectingDetails || qty != null || isPointingAtProduct(lower) || collectingSize)
       ? [
           {
             name: chosen.name,
             quantity: qty || 1,
-            variant: null,
+            variant: size,
             unit_price: chosen.price,
           },
         ]
       : [];
 
-  if (!phoneMatch && !productsList.length && !address && !payment && !name) return null;
+  if (!phoneMatch && !productsList.length && !address && !payment && !name && !size) return null;
   return {
     customer_name: name,
     phone: phoneMatch?.[0] ?? null,
@@ -840,4 +1020,31 @@ export function parseOrderFromText(
     payment_status: payment === "cod" ? ("unpaid" as PaymentStatus) : null,
     notes: null,
   };
+}
+
+function extractSizeToken(text: string): string | null {
+  const labeled = text.match(/(?:size|sz)\s*[:=]?\s*([A-Za-z0-9]{1,4})/i);
+  if (labeled) return labeled[1];
+  const bare = text.trim().match(/^([A-Za-z0-9]{1,4})$/);
+  return bare ? bare[1] : null;
+}
+
+function extractSizeForProduct(
+  text: string,
+  chosen: CatalogProduct | null | undefined,
+  catalog?: CatalogProduct[],
+  awaitingSize?: boolean
+): string | null {
+  const token = extractSizeToken(text);
+  if (!token) return null;
+  const sizes = parseSizeOptions(chosen?.sizes) || [];
+  if (sizes.length) {
+    const hit = sizes.find((s) => s.toLowerCase() === token.toLowerCase());
+    if (hit) return `Size ${hit}`;
+    if (!awaitingSize) return null;
+  }
+  if (awaitingSize || /size/i.test(text)) return `Size ${token}`;
+  const anySized = catalog?.some((p) => parseSizeOptions(p.sizes).length);
+  if (anySized && awaitingSize) return `Size ${token}`;
+  return null;
 }
