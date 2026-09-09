@@ -2,10 +2,27 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSessionUserId } from "@/lib/auth/session";
 import { nowIso, readDb, uid, writeDb } from "@/lib/db/store";
 import { uploadChatMedia } from "@/lib/db/supabase-sync";
-import { sendWhatsAppMediaMessage, sendWhatsAppText, uploadWhatsAppMedia } from "@/lib/whatsapp/client";
+import { sendWhatsAppMediaByLink, sendWhatsAppMediaMessage, sendWhatsAppText, uploadWhatsAppMedia } from "@/lib/whatsapp/client";
 import { resolveWhatsAppAuth } from "@/lib/whatsapp/credentials";
 
 export const maxDuration = 60;
+
+function sniffMime(bytes: Buffer, fallback: string) {
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
+  if (bytes.length >= 4 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
+    return "image/png";
+  }
+  if (bytes.length >= 4 && bytes.slice(0, 4).toString("ascii") === "OggS") return "audio/ogg";
+  if (bytes.length >= 3 && bytes.slice(0, 3).toString("ascii") === "ID3") return "audio/mpeg";
+  if (bytes.length >= 2 && bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0) return "audio/mpeg";
+  if (bytes.length >= 12 && bytes.slice(4, 8).toString("ascii") === "ftyp") {
+    const brand = bytes.slice(8, 12).toString("ascii");
+    if (/mp4|isom|iso2|avc1/.test(brand)) return "video/mp4";
+    if (/M4A|mp42/.test(brand)) return "audio/mp4";
+    return "video/mp4";
+  }
+  return fallback;
+}
 
 function kindFromMime(mime: string, voice: boolean): "image" | "video" | "audio" | null {
   if (mime.startsWith("image/")) return "image";
@@ -14,29 +31,24 @@ function kindFromMime(mime: string, voice: boolean): "image" | "video" | "audio"
   return null;
 }
 
-function extFor(mime: string, voice: boolean) {
+function extFor(mime: string) {
   if (mime.includes("png")) return ".png";
-  if (mime.includes("webp")) return ".webp";
-  if (mime.includes("gif")) return ".gif";
-  if (mime.includes("mp4")) return ".mp4";
-  if (mime.includes("webm") && mime.startsWith("video")) return ".webm";
-  if (mime.includes("ogg") || mime.includes("webm") || voice) return ".ogg";
+  if (mime.includes("jpeg") || mime.includes("jpg")) return ".jpg";
+  if (mime.includes("mp4") && mime.startsWith("video")) return ".mp4";
   if (mime.includes("mpeg") || mime.includes("mp3")) return ".mp3";
+  if (mime.includes("ogg")) return ".ogg";
   if (mime.startsWith("audio/")) return ".m4a";
   if (mime.startsWith("video/")) return ".mp4";
-  return ".jpg";
+  return ".bin";
 }
 
-/** Graph API: voice notes must be OGG/OPUS. Chrome often records webm+opus. */
-function graphMime(mime: string, voice: boolean) {
-  if (voice || mime.startsWith("audio/")) {
-    if (mime.includes("ogg") || mime.includes("opus") || mime.includes("webm")) return "audio/ogg";
-    if (mime.includes("mpeg") || mime.includes("mp3")) return "audio/mpeg";
-    if (mime.includes("mp4") || mime.includes("m4a") || mime.includes("aac")) return "audio/mp4";
-    return "audio/ogg";
-  }
-  if (mime.startsWith("video/")) return mime.includes("mp4") ? "video/mp4" : mime;
-  return mime || "image/jpeg";
+function graphMime(mime: string) {
+  if (mime.startsWith("image/")) return mime.includes("png") ? "image/png" : "image/jpeg";
+  if (mime.startsWith("video/")) return "video/mp4";
+  if (mime.includes("mpeg") || mime.includes("mp3")) return "audio/mpeg";
+  if (mime.includes("ogg")) return "audio/ogg";
+  if (mime.includes("mp4") || mime.includes("m4a") || mime.includes("aac")) return "audio/mp4";
+  return mime;
 }
 
 export async function POST(
@@ -87,10 +99,21 @@ export async function POST(
 
   try {
     if (file) {
-      const mime = file.type || (voiceNote ? "audio/ogg" : "application/octet-stream");
+      const hinted = file.type || (voiceNote ? "audio/mpeg" : "application/octet-stream");
+      const bytes = Buffer.from(await file.arrayBuffer());
+      const mime = sniffMime(bytes, hinted);
       const kind = kindFromMime(mime, voiceNote);
       if (!kind) {
         return NextResponse.json({ error: "Sirf photo, video ya voice/audio allowed hai" }, { status: 400 });
+      }
+      if (kind === "image" && !/^image\/(jpeg|png)$/.test(mime)) {
+        return NextResponse.json({ error: "Photo JPEG/PNG honi chahiye" }, { status: 400 });
+      }
+      if (kind === "audio" && /webm/i.test(mime)) {
+        return NextResponse.json(
+          { error: "Voice convert nahi hui. Dobara mic se bhejein." },
+          { status: 400 }
+        );
       }
       const max = kind === "image" ? 5_000_000 : 16_000_000;
       if (file.size > max) {
@@ -99,26 +122,44 @@ export async function POST(
           { status: 400 }
         );
       }
-      const bytes = Buffer.from(await file.arrayBuffer());
-      const graphType = graphMime(mime, voiceNote || kind === "audio");
-      const filename = `${uid()}${extFor(graphType, voiceNote || kind === "audio")}`;
-      mediaUrl = await uploadChatMedia(filename, bytes, mime);
-      const mediaId = await uploadWhatsAppMedia({
-        phoneNumberId,
-        accessToken,
-        bytes,
-        mimeType: graphType,
-        filename,
-      });
-      const sent = await sendWhatsAppMediaMessage({
-        phoneNumberId,
-        accessToken,
-        to: conv.customer_phone,
-        kind,
-        mediaId,
-        caption: text || undefined,
-        voiceNote: voiceNote || kind === "audio",
-      });
+      const graphType = graphMime(mime);
+      const filename = `${uid()}${extFor(graphType)}`;
+      mediaUrl = await uploadChatMedia(filename, bytes, graphType);
+      const useVoice = graphType === "audio/ogg";
+      let sent: { messages?: Array<{ id?: string }> } | null = null;
+      if (mediaUrl.startsWith("https://")) {
+        try {
+          sent = await sendWhatsAppMediaByLink({
+            phoneNumberId,
+            accessToken,
+            to: conv.customer_phone,
+            kind,
+            link: mediaUrl,
+            caption: text || undefined,
+            voiceNote: useVoice,
+          });
+        } catch (linkErr) {
+          console.error("WhatsApp media link failed, trying upload:", linkErr);
+        }
+      }
+      if (!sent) {
+        const mediaId = await uploadWhatsAppMedia({
+          phoneNumberId,
+          accessToken,
+          bytes,
+          mimeType: graphType,
+          filename,
+        });
+        sent = await sendWhatsAppMediaMessage({
+          phoneNumberId,
+          accessToken,
+          to: conv.customer_phone,
+          kind,
+          mediaId,
+          caption: text || undefined,
+          voiceNote: useVoice,
+        });
+      }
       waId = sent?.messages?.[0]?.id ?? null;
       messageType = kind;
       content = text || (kind === "audio" ? "🎤 Voice note" : kind === "video" ? "🎬 Video" : "📷 Photo");
@@ -138,8 +179,8 @@ export async function POST(
         error:
           msg.includes("expired") || msg.includes("190")
             ? "WhatsApp token expire hai. Dashboard → WhatsApp pe naya token save karein."
-            : msg.includes("audio") || msg.includes("ogg") || msg.includes("131053")
-              ? "Voice note WhatsApp ne reject ki. Photo/video bhejein, ya Firefox se record karein (OGG)."
+            : /audio|ogg|webm|131053/i.test(msg)
+              ? "Voice/photo WhatsApp ne reject ki. Photo JPEG bhejein; voice dubara record karein."
               : msg.slice(0, 280),
       },
       { status: 502 }

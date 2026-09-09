@@ -21,6 +21,8 @@ import {
 } from "@/lib/db/store";
 import type { AgentResponse, ParsedOrderData } from "@/types/database";
 
+const inflightInbound = new Set<string>();
+
 interface WebhookMessage {
   from: string;
   id: string;
@@ -70,6 +72,9 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
       const agentOn = config.agent_enabled !== false;
 
       for (const msg of messages) {
+        if (inflightInbound.has(msg.id)) continue;
+        inflightInbound.add(msg.id);
+        try {
         const inbound = await resolveInboundText(
           msg,
           auth.accessToken,
@@ -212,7 +217,9 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
           return c?.phone === customerPhone || c?.whatsapp_id === customerPhone || o.whatsapp_conversation_id === conversation.id;
         });
 
-        const agentResponse = await processAgentMessage({
+        let agentResponse: AgentResponse;
+        try {
+          agentResponse = await processAgentMessage({
           message: inboundText,
           conversationHistory: history,
           businessName: business.name,
@@ -234,6 +241,23 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
             customerTotal: customerOrders.length,
           },
         });
+        if (!agentResponse?.reply?.trim()) {
+          throw new Error("Empty agent reply");
+        }
+        } catch (err) {
+          console.error("Agent failed, sending fallback:", err);
+          agentResponse = {
+            intent: "general",
+            reply:
+              "Maaf kijiye, reply ruk gaya tha. Aap ka last message save hai — ek line mein dobara likh dein, main continue karta hoon.",
+            parsed_order: conversation.pending_order_data as AgentResponse["parsed_order"],
+            should_create_order: false,
+            order_id: null,
+            confidence: 0.2,
+            needs_human: true,
+            skip_media: true,
+          };
+        }
 
         let orderId: string | null = null;
         if (agentResponse.should_create_order && agentResponse.parsed_order) {
@@ -272,19 +296,44 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
           }
         }
 
-        try {
-          await sendAgentOutbound({
-            phoneNumberId,
-            accessToken,
-            customerPhone,
-            businessId: business.id,
-            conversationId: conversation.id,
-            replyText,
-            agentResponse,
-          });
-        } catch (error) {
-          console.error("WhatsApp send failed:", error);
-          await recordWhatsAppError(business.id, String(error));
+        if (accessToken && phoneNumberId && replyText.trim()) {
+          await markMessageAsRead(phoneNumberId, accessToken, msg.id, true).catch(() => {});
+          try {
+            await sendAgentOutbound({
+              phoneNumberId,
+              accessToken,
+              customerPhone,
+              businessId: business.id,
+              conversationId: conversation.id,
+              replyText,
+              agentResponse,
+            });
+          } catch (error) {
+            console.error("WhatsApp send failed:", error);
+            await recordWhatsAppError(business.id, String(error));
+            if (orderId && agentResponse.parsed_order) {
+              const latest = await readDb();
+              const conv = latest.conversations.find((c) => c.id === conversation!.id);
+              if (conv) {
+                conv.pending_order_data = agentResponse.parsed_order as unknown as Record<string, unknown>;
+                conv.status = "awaiting_confirmation";
+                await writeDb(latest);
+              }
+            }
+            try {
+              await sendWhatsAppText({
+                phoneNumberId,
+                accessToken,
+                to: customerPhone,
+                message: replyText.slice(0, 4000),
+              });
+            } catch (retryErr) {
+              console.error("WhatsApp fallback text failed:", retryErr);
+            }
+          }
+        }
+        } finally {
+          setTimeout(() => inflightInbound.delete(msg.id), 90_000);
         }
       }
     }
@@ -420,6 +469,17 @@ async function sendAgentOutbound(params: {
   agentResponse: AgentResponse;
 }) {
   const { phoneNumberId, accessToken, customerPhone } = params;
+  const dbDup = await readDb();
+  const lastOut = [...dbDup.messages]
+    .reverse()
+    .find((m) => m.conversation_id === params.conversationId && m.direction === "outbound");
+  if (
+    lastOut &&
+    lastOut.content.trim() === params.replyText.trim() &&
+    Date.now() - new Date(lastOut.created_at).getTime() < 45_000
+  ) {
+    return;
+  }
   const skipExtra = Boolean(params.agentResponse.skip_media);
   const buttons = skipExtra ? [] : params.agentResponse.quick_replies?.slice(0, 3) || [];
   let sentText = false;

@@ -38,10 +38,10 @@ export function ChatToolbar({
 
   return (
     <div className="flex flex-wrap gap-2">
-      <Button type="button" variant={paused ? "default" : "outline"} size="sm" disabled={busy} onClick={toggleAgent}>
+      <Button type="button" variant={paused ? "default" : "outline"} size="sm" className="h-8 text-[11px] sm:text-xs" disabled={busy} onClick={toggleAgent}>
         {paused ? "Auto-reply OFF (sirf ye chat)" : "Auto-reply ON (ye chat)"}
       </Button>
-      <Button type="button" variant="outline" size="sm" disabled={busy} onClick={clearMessages}>
+      <Button type="button" variant="outline" size="sm" className="h-8 text-[11px] sm:text-xs" disabled={busy} onClick={clearMessages}>
         Clear messages
       </Button>
     </div>

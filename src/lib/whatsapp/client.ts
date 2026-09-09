@@ -85,7 +85,8 @@ export async function sendWhatsAppImage({
 export async function markMessageAsRead(
   phoneNumberId: string,
   accessToken: string,
-  messageId: string
+  messageId: string,
+  typing = false
 ) {
   const response = await fetch(`${WHATSAPP_API}/${phoneNumberId}/messages`, {
     method: "POST",
@@ -97,7 +98,7 @@ export async function markMessageAsRead(
       messaging_product: "whatsapp",
       status: "read",
       message_id: messageId,
-      typing_indicator: { type: "text" },
+      ...(typing ? { typing_indicator: { type: "text" } } : {}),
     }),
   });
   if (!response.ok) {
@@ -245,6 +246,40 @@ export async function uploadWhatsAppMedia(params: {
   const json = (await res.json()) as { id?: string };
   if (!json.id) throw new Error("WhatsApp media id missing");
   return json.id;
+}
+
+export async function sendWhatsAppMediaByLink(params: {
+  phoneNumberId: string;
+  accessToken: string;
+  to: string;
+  kind: "image" | "video" | "audio";
+  link: string;
+  caption?: string;
+  voiceNote?: boolean;
+}) {
+  const normalizedPhone = params.to.replace(/\D/g, "").replace(/^0/, "92");
+  const mediaBody =
+    params.kind === "audio"
+      ? { link: params.link, ...(params.voiceNote ? { voice: true } : {}) }
+      : { link: params.link, ...(params.caption ? { caption: params.caption } : {}) };
+  const response = await fetch(`${WHATSAPP_API}/${params.phoneNumberId}/messages`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${params.accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to: normalizedPhone,
+      type: params.kind,
+      [params.kind]: mediaBody,
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`WhatsApp ${params.kind} link send failed: ${await response.text()}`);
+  }
+  return response.json();
 }
 
 export async function sendWhatsAppMediaMessage(params: {

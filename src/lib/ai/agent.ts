@@ -395,6 +395,65 @@ function lastAskedToConfirm(history?: Array<{ role: string; content: string }>) 
   return /confirm ke liye|reply "yes"|reply 'yes'|reply “yes”|to confirm|yes likhein|haan likhein/.test(last);
 }
 
+function isConfirmYes(message: string) {
+  const t = message.trim().toLowerCase();
+  return /^(yes+|haan|han|yup|yep|ok+|okay|theek|confirm|done|bilkul)[\s!.]*$/i.test(t);
+}
+
+function isSmallTalk(message: string) {
+  const t = message.trim().toLowerCase();
+  if (isConfirmYes(t) || isSoftNo(t) || isCancelRequest(t)) return false;
+  return /^(hi+|hello+|hey+|salam|salaam|assalam(?:o| u | o )?alaikum|yo+|thanks|thank you|shukriya|ok+|okay|theek(?: hai)?|ji|jee|acha|nice|great|cool|alright|done thanks|ok thank you|ok thanks)[\s!.]*$/i.test(
+    t
+  );
+}
+
+function looksLikePersonName(name?: string | null) {
+  if (!name || isBogusName(name)) return false;
+  if (/whatsapp customer|full stack|developer|shop|store|official/i.test(name)) return false;
+  const words = name.trim().split(/\s+/);
+  return words.length >= 2 && words.length <= 5 && name.length <= 40;
+}
+
+function recoverFieldsFromHistory(
+  history?: Array<{ role: string; content: string }>
+): Pick<ParsedOrderData, "customer_name" | "address" | "payment_method"> {
+  const found: Pick<ParsedOrderData, "customer_name" | "address" | "payment_method"> = {
+    customer_name: null,
+    address: null,
+    payment_method: null,
+  };
+  for (const m of [...(history || [])].reverse()) {
+    if (m.role !== "assistant") continue;
+    const name = m.content.match(/(?:Naam|Name):\s*([^\n]+)/i);
+    const addr = m.content.match(/Address:\s*([^\n]+)/i);
+    const pay = m.content.match(/Payment:\s*([^\n]+)/i);
+    if (name && looksLikePersonName(name[1].trim()) && !found.customer_name) {
+      found.customer_name = name[1].trim();
+    }
+    if (addr && addr[1].trim().length > 4 && !found.address) found.address = addr[1].trim();
+    if (pay && !found.payment_method) {
+      found.payment_method = extractPayment(pay[1].toLowerCase());
+    }
+    if (found.customer_name && found.address && found.payment_method) break;
+  }
+  return found;
+}
+
+function hydratePending(params: AgentParams, pending: ParsedOrderData): ParsedOrderData {
+  const recovered = recoverFieldsFromHistory(params.conversationHistory);
+  const waName = looksLikePersonName(params.customerName) ? params.customerName! : null;
+  return {
+    ...pending,
+    customer_name:
+      isBogusName(pending.customer_name) || !pending.customer_name
+        ? recovered.customer_name || waName
+        : pending.customer_name,
+    address: pending.address || recovered.address,
+    payment_method: pending.payment_method || recovered.payment_method,
+  };
+}
+
 function orderLooksComplete(order: ParsedOrderData, catalog?: CatalogProduct[]) {
   return Boolean(order.products.length && order.customer_name && order.address && order.payment_method) &&
     !nextMissingField(order, catalog);
@@ -579,10 +638,10 @@ function lockProductForCheckout(params: AgentParams, product: CatalogProduct, qt
     },
     params.products
   );
-  const clean: ParsedOrderData = {
+  const clean = hydratePending(params, {
     ...pending,
     customer_name: isBogusName(pending.customer_name) ? null : pending.customer_name,
-  };
+  });
   const missing = nextMissingField(clean, params.products);
   return {
     intent: "place_order",
@@ -757,8 +816,9 @@ function inferCheckoutAsk(
   const fromNotes = lastAssistantAsk(pending);
   if (fromNotes) return fromNotes;
   const last = lastAssistantContent(history).toLowerCase();
+  if (/kya change karna|what should i change/.test(last)) return null;
   if (/size\b/.test(last) && /bata|share|which|ka size/.test(last)) return "size";
-  if (/poora naam|full name|sirf naam|apna naam/.test(last)) return "naam";
+  if (/poora naam|full name|sirf naam|apna naam/.test(last) && !/naam:/.test(last)) return "naam";
   if (/delivery address|apna address|share.*address/.test(last) && !/payment/.test(last)) return "address";
   if (/payment method|cod|easypaisa|jazzcash/.test(last) && /share|bata|bhej/.test(last)) return "payment";
   return nextMissingField(pending, catalog)?.key ?? null;
@@ -841,8 +901,10 @@ function continueLockedOrder(
   const leave = wantsToLeaveCheckout(params.message);
   if (leave === "browse") return null;
 
-  let pending = mergeOrder(params.pendingOrder, null, params.products);
+  let pending = hydratePending(params, mergeOrder(params.pendingOrder, null, params.products));
   if (!pending.products.length) {
+    // "Hello" after a draft must NOT start a new checkout that forgets name/address.
+    if (isSmallTalk(params.message) && !opts?.force) return null;
     const offered =
       params.referredProduct || lastOfferedProduct(params.conversationHistory, params.products);
     const hist = params.conversationHistory || [];
@@ -892,10 +954,28 @@ function continueLockedOrder(
     );
   }
 
+  pending = hydratePending(params, pending);
   const en = inferCustomerLanguage(params.message, params.conversationHistory) === "English";
   if (String(pending.notes || "") === "revise") {
+    if (isConfirmYes(params.message) && orderLooksComplete(pending, params.products)) {
+      return {
+        intent: "confirm_order",
+        reply: en
+          ? "Thank you — order confirmed. We'll process it shortly."
+          : "Shukriya! Order confirm ho gaya. Hum jald process karenge.",
+        parsed_order: { ...pending, notes: null },
+        should_create_order: true,
+        order_id: null,
+        confidence: 1,
+        needs_human: false,
+        skip_media: true,
+      };
+    }
     const choice = applyReviseChoice(params.message, pending, params);
     if (choice) return choice;
+    if (isSmallTalk(params.message)) {
+      return declineOrReviseReply(pending, en, params);
+    }
   }
   const awaiting = inferCheckoutAsk(pending, params.conversationHistory, params.products);
 
@@ -943,17 +1023,49 @@ function continueLockedOrder(
     params.referredProduct || lastOfferedProduct(params.conversationHistory, params.products)
   );
   pending = mergeOrder(pending, extracted, params.products);
+  pending = hydratePending(params, pending);
   if (isBogusName(pending.customer_name)) {
     pending = { ...pending, customer_name: null };
+    pending = hydratePending(params, pending);
   }
 
-  const confirming = ["yes", "haan", "han", "confirm", "done", "bilkul"].some(
-    (w) => params.message.toLowerCase().split(/\s+/).includes(w) || params.message.toLowerCase().trim() === w
-  );
+  const confirming = isConfirmYes(params.message);
   const complete = !nextMissingField(pending, params.products);
 
   if (isSoftNo(params.message) && pending.products.length) {
     return declineOrReviseReply(pending, en, params);
+  }
+
+  if (isSmallTalk(params.message) && pending.products.length) {
+    const missing = nextMissingField(pending, params.products);
+    const snap = checkoutSnapshot(pending, en);
+    if (missing) {
+      const prompt = missing.key === "payment" ? paymentPrompt(params, en) : missing.prompt;
+      return {
+        intent: "place_order",
+        reply: en
+          ? `Still here.\n${snap}\n\nPlease share your ${prompt}.`
+          : `Ji, order yahi pending hai — jo de chuke ho woh save hai.\n${snap}\n\nAb ${prompt} bhej dein.`,
+        parsed_order: { ...pending, notes: missing.key },
+        should_create_order: false,
+        order_id: null,
+        confidence: 1,
+        needs_human: false,
+        skip_media: true,
+      };
+    }
+    return {
+      intent: "place_order",
+      reply: en
+        ? `${snap}\n\nThis is already saved. Reply "yes" to confirm.`
+        : `${snap}\n\nYeh sab save hai. Confirm ke liye "yes" likhein.`,
+      parsed_order: { ...pending, notes: null },
+      should_create_order: false,
+      order_id: null,
+      confidence: 1,
+      needs_human: false,
+      skip_media: true,
+    };
   }
 
   if (confirming && complete && !isSoftNo(params.message)) {
@@ -1238,7 +1350,7 @@ LATEST_CUSTOMER_MESSAGE: ${params.message}`;
             { role: "user", content: user },
           ],
         },
-        { timeout: 16000 }
+        { timeout: 9000 }
       );
       raw = completion.choices[0]?.message?.content || "{}";
       lastErr = null;
@@ -1793,12 +1905,6 @@ function inferCustomerLanguage(
     return "English";
   }
   return "the same language as the customer message";
-}
-
-function isSmallTalk(lower: string) {
-  return /^(ok+|okay|theek|theek hai|shukriya|thanks|thank you|ok thank you|ok thanks|jee|ji|acha|nice|great|cool|alright|done thanks)[\s!.]*$/i.test(
-    lower.trim()
-  );
 }
 
 function isPhotoRequest(lower: string) {
