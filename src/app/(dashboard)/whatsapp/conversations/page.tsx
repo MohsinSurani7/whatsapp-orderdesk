@@ -44,6 +44,11 @@ export default async function ConversationsPage() {
                       <div className="flex flex-wrap items-center gap-2">
                         <p className="font-medium text-gray-900">{conv.customer_name || conv.customer_phone}</p>
                         <StatusBadge status={conv.status} />
+                        {conv.agent_paused && (
+                          <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-800">
+                            AI off
+                          </span>
+                        )}
                         {needsReply && <StatusBadge status="needs_reply" />}
                       </div>
                       <p className="truncate text-sm text-gray-500">

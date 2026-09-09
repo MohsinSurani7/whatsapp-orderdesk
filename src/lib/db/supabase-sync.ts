@@ -126,7 +126,10 @@ export async function loadDbFromSupabase(): Promise<DatabaseShape> {
       quantity: num(i.quantity, 1),
       unit_price: num(i.unit_price),
     })) as LocalOrderItem[],
-    conversations: (conversations.data || []) as LocalConversation[],
+    conversations: (conversations.data || []).map((c) => ({
+      ...c,
+      agent_paused: Boolean(c.agent_paused),
+    })) as LocalConversation[],
     messages: (messages.data || []).map((m) => ({
       id: m.id,
       business_id: m.business_id,
@@ -273,4 +276,24 @@ export async function uploadProductImage(filename: string, bytes: Buffer, conten
   if (error) throw error;
   const { data } = sb.storage.from("product-images").getPublicUrl(path);
   return data.publicUrl;
+}
+
+export async function uploadChatMedia(filename: string, bytes: Buffer, contentType: string) {
+  if (isSupabaseEnabled()) {
+    const sb = createAdminClient();
+    const path = `chat/${filename}`;
+    const { error } = await sb.storage.from("product-images").upload(path, bytes, {
+      contentType,
+      upsert: true,
+    });
+    if (error) throw error;
+    const { data } = sb.storage.from("product-images").getPublicUrl(path);
+    return data.publicUrl;
+  }
+  const fs = await import("fs");
+  const pathMod = await import("path");
+  const dir = pathMod.join(process.cwd(), "public", "uploads", "chat");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(pathMod.join(dir, filename), bytes);
+  return `/uploads/chat/${filename}`;
 }

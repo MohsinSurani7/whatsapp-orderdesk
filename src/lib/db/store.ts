@@ -106,6 +106,7 @@ export interface LocalConversation {
   customer_name: string | null;
   status: string;
   pending_order_data: Record<string, unknown> | null;
+  agent_paused?: boolean;
   last_message_at: string;
   created_at: string;
 }

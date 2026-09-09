@@ -28,11 +28,14 @@ export default function ProductsPage() {
   const [importUrl, setImportUrl] = useState("");
   const [importing, setImporting] = useState(false);
   const [importMsg, setImportMsg] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkDeleting, setBulkDeleting] = useState(false);
 
   async function load() {
     const res = await fetch("/api/products");
     const data = await res.json();
     setProducts(data.products ?? []);
+    setSelected(new Set());
   }
 
   useEffect(() => {
@@ -59,6 +62,33 @@ export default function ProductsPage() {
   async function deleteProduct(id: string) {
     if (!confirm("Yeh product delete ho jayega. Confirm?")) return;
     await fetch(`/api/products/${id}`, { method: "DELETE" });
+    load();
+  }
+
+  function toggleSelect(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleSelectAll() {
+    if (selected.size === products.length) setSelected(new Set());
+    else setSelected(new Set(products.map((p) => p.id)));
+  }
+
+  async function bulkDelete() {
+    if (!selected.size) return;
+    if (!confirm(`${selected.size} products delete ho jayenge. Confirm?`)) return;
+    setBulkDeleting(true);
+    await fetch("/api/products/bulk-delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids: [...selected] }),
+    });
+    setBulkDeleting(false);
     load();
   }
 
@@ -112,6 +142,28 @@ export default function ProductsPage() {
           <Plus size={16} /> Add Product
         </Button>
       </div>
+
+      {products.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-white px-3 py-2">
+          <label className="flex items-center gap-2 text-sm text-gray-700">
+            <input
+              type="checkbox"
+              checked={selected.size === products.length && products.length > 0}
+              onChange={toggleSelectAll}
+            />
+            Select all ({selected.size} selected)
+          </label>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={!selected.size || bulkDeleting}
+            onClick={bulkDelete}
+          >
+            <Trash2 size={14} /> {bulkDeleting ? "Deleting..." : `Delete selected (${selected.size})`}
+          </Button>
+        </div>
+      )}
 
       <Card>
         <CardHeader>
@@ -227,8 +279,16 @@ export default function ProductsPage() {
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {products.map((p) => (
-          <Card key={p.id} className="overflow-hidden">
-            <div className="aspect-[4/3] bg-gray-100">
+          <Card key={p.id} className={`overflow-hidden ${selected.has(p.id) ? "ring-2 ring-green-600" : ""}`}>
+            <div className="relative aspect-[4/3] bg-gray-100">
+              <label className="absolute left-2 top-2 z-10 flex h-7 w-7 items-center justify-center rounded bg-white/90 shadow">
+                <input
+                  type="checkbox"
+                  checked={selected.has(p.id)}
+                  onChange={() => toggleSelect(p.id)}
+                  aria-label={`Select ${p.name}`}
+                />
+              </label>
               {p.image_url ? (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img src={p.image_url} alt={p.name} className="h-full w-full object-cover" />

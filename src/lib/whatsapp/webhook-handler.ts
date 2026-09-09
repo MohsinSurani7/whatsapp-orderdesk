@@ -9,7 +9,7 @@ import {
   downloadWhatsAppMedia,
 } from "@/lib/whatsapp/client";
 import { resolveWhatsAppAuth } from "@/lib/whatsapp/credentials";
-import { isSupabaseEnabled } from "@/lib/db/supabase-sync";
+import { isSupabaseEnabled, uploadChatMedia } from "@/lib/db/supabase-sync";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
   nowIso,
@@ -28,6 +28,7 @@ interface WebhookMessage {
   text?: { body: string };
   context?: { id?: string; from?: string };
   image?: { caption?: string; id?: string };
+  video?: { caption?: string; id?: string };
   audio?: { id?: string; mime_type?: string };
   voice?: { id?: string; mime_type?: string };
   interactive?: {
@@ -124,6 +125,7 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
             customer_name: customerWaName || customer.name,
             status: agentOn ? "active" : "handed_off",
             pending_order_data: null,
+            agent_paused: false,
             last_message_at: nowIso(),
             created_at: nowIso(),
           };
@@ -139,29 +141,33 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
           (msg.type === "audio" || msg.type === "voice") &&
           !/^\[voice (message|failed)/i.test(inboundText.trim());
         const storedInbound = voiceOk ? `🎤 ${inboundText}` : inboundText;
+        const inboundType =
+          msg.type === "image"
+            ? "image"
+            : msg.type === "video"
+              ? "video"
+              : msg.type === "audio" || msg.type === "voice"
+                ? "audio"
+                : msg.type === "interactive"
+                  ? "interactive"
+                  : "text";
 
         db.messages.push({
           id: uid(),
           business_id: business.id,
           conversation_id: conversation.id,
           direction: "inbound",
-          message_type:
-            msg.type === "image"
-              ? "image"
-              : msg.type === "audio" || msg.type === "voice"
-                ? "audio"
-                : msg.type === "interactive"
-                  ? "interactive"
-                  : "text",
+          message_type: inboundType,
           content: storedInbound,
           whatsapp_message_id: msg.id,
-          image_url: null,
+          image_url: inbound.mediaUrl || null,
           created_at: nowIso(),
         });
         conversation.last_message_at = nowIso();
         await writeDb(db);
 
-        if (!agentOn) {
+        const chatAgentOn = agentOn && conversation.agent_paused !== true;
+        if (!chatAgentOn) {
           continue;
         }
 
@@ -175,7 +181,7 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
 
         const history = db.messages
           .filter((m) => m.conversation_id === conversation!.id)
-          .slice(-20)
+          .slice(-40)
           .map((m) => ({
             role: (m.direction === "inbound" ? "user" : "assistant") as "user" | "assistant",
             content: m.content.replace(/^🎤\s*/, ""),
@@ -236,8 +242,10 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
           const latest = await readDb();
           const conv = latest.conversations.find((c) => c.id === conversation!.id);
           if (conv) {
-            conv.pending_order_data = agentResponse.parsed_order as unknown as Record<string, unknown>;
-            conv.status = agentResponse.needs_human ? "handed_off" : "awaiting_confirmation";
+            const po = agentResponse.parsed_order;
+            const empty = !po.products?.length && !po.customer_name && !po.address && !po.payment_method;
+            conv.pending_order_data = empty ? null : (po as unknown as Record<string, unknown>);
+            conv.status = agentResponse.needs_human ? "handed_off" : empty ? "active" : "awaiting_confirmation";
             conv.last_message_at = nowIso();
             await writeDb(latest);
           }
@@ -287,14 +295,19 @@ async function resolveInboundText(
   msg: WebhookMessage,
   accessToken: string | null,
   groqKey: string | null
-): Promise<{ text: string; category: string | null; seeMoreId: string | null } | null> {
+): Promise<{ text: string; category: string | null; seeMoreId: string | null; mediaUrl?: string | null } | null> {
   if (msg.type === "text") {
     const body = msg.text?.body?.trim();
     if (!body) return null;
     return { text: body, category: null, seeMoreId: null };
   }
   if (msg.type === "image") {
-    return { text: msg.image?.caption || "[photo]", category: null, seeMoreId: null };
+    const mediaUrl = await saveInboundMedia(accessToken, msg.image?.id, "image/jpeg");
+    return { text: msg.image?.caption || "[photo]", category: null, seeMoreId: null, mediaUrl };
+  }
+  if (msg.type === "video") {
+    const mediaUrl = await saveInboundMedia(accessToken, msg.video?.id, "video/mp4");
+    return { text: msg.video?.caption || "[video]", category: null, seeMoreId: null, mediaUrl };
   }
   if (msg.type === "interactive") {
     const id = msg.interactive?.button_reply?.id || msg.interactive?.list_reply?.id || "";
@@ -324,22 +337,50 @@ async function resolveInboundText(
     try {
       const file = await downloadWhatsAppMedia(accessToken, mediaId);
       console.log("Voice media downloaded", file.bytes.length, file.mimeType);
+      const mediaUrl = await saveBytesAsChatMedia(file.bytes, file.mimeType).catch(() => null);
       const spoken = await transcribeWhatsAppAudio({
         groqApiKey: groqKey,
         bytes: file.bytes,
         mimeType: msg.audio?.mime_type || msg.voice?.mime_type || file.mimeType,
       });
       if (!spoken) {
-        return { text: "[voice failed]", category: null, seeMoreId: null };
+        return { text: "[voice failed]", category: null, seeMoreId: null, mediaUrl };
       }
-      // Prefix helps dashboards; agent still reads the spoken words
-      return { text: spoken, category: null, seeMoreId: null };
+      return { text: spoken, category: null, seeMoreId: null, mediaUrl };
     } catch (err) {
       console.error("Voice transcribe failed:", err);
       return { text: "[voice failed]", category: null, seeMoreId: null };
     }
   }
   return null;
+}
+
+function mediaExt(mime: string) {
+  if (mime.includes("png")) return ".png";
+  if (mime.includes("webp")) return ".webp";
+  if (mime.includes("gif")) return ".gif";
+  if (mime.includes("mp4")) return ".mp4";
+  if (mime.includes("webm")) return ".webm";
+  if (mime.includes("ogg")) return ".ogg";
+  if (mime.includes("mpeg") || mime.includes("mp3")) return ".mp3";
+  if (mime.startsWith("audio/")) return ".ogg";
+  if (mime.startsWith("video/")) return ".mp4";
+  return ".bin";
+}
+
+async function saveBytesAsChatMedia(bytes: Buffer, mimeType: string) {
+  return uploadChatMedia(`${uid()}${mediaExt(mimeType)}`, bytes, mimeType);
+}
+
+async function saveInboundMedia(accessToken: string | null, mediaId?: string, fallbackMime = "application/octet-stream") {
+  if (!mediaId || !accessToken) return null;
+  try {
+    const file = await downloadWhatsAppMedia(accessToken, mediaId);
+    return await saveBytesAsChatMedia(file.bytes, file.mimeType || fallbackMime);
+  } catch (err) {
+    console.error("Inbound media save failed:", err);
+    return null;
+  }
 }
 
 async function storeOutbound(params: {
@@ -379,7 +420,8 @@ async function sendAgentOutbound(params: {
   agentResponse: AgentResponse;
 }) {
   const { phoneNumberId, accessToken, customerPhone } = params;
-  const buttons = params.agentResponse.quick_replies?.slice(0, 3) || [];
+  const skipExtra = Boolean(params.agentResponse.skip_media);
+  const buttons = skipExtra ? [] : params.agentResponse.quick_replies?.slice(0, 3) || [];
   let sentText = false;
   if (buttons.length && params.replyText.trim()) {
     try {
@@ -418,7 +460,7 @@ async function sendAgentOutbound(params: {
     });
   }
 
-  const list = params.agentResponse.list_menu;
+  const list = skipExtra ? undefined : params.agentResponse.list_menu;
   if (list?.rows?.length) {
     try {
       const sent = await sendWhatsAppList({
@@ -442,7 +484,8 @@ async function sendAgentOutbound(params: {
   }
 
   const publicBase = (process.env.NEXT_PUBLIC_APP_URL || "").replace(/\/$/, "");
-  for (const img of (params.agentResponse.send_images || []).slice(0, 10)) {
+  const images = skipExtra ? [] : params.agentResponse.send_images || [];
+  for (const img of images.slice(0, 10)) {
     const absolute = img.path.startsWith("http") ? img.path : `${publicBase}${img.path}`;
     if (!absolute.startsWith("https://")) continue;
     try {

@@ -222,6 +222,65 @@ export async function downloadWhatsAppMedia(accessToken: string, mediaId: string
   return { bytes, mimeType: info.mime_type || "audio/ogg" };
 }
 
+export async function uploadWhatsAppMedia(params: {
+  phoneNumberId: string;
+  accessToken: string;
+  bytes: Buffer;
+  mimeType: string;
+  filename: string;
+}) {
+  const form = new FormData();
+  form.append("messaging_product", "whatsapp");
+  form.append("type", params.mimeType);
+  const blob = new Blob([new Uint8Array(params.bytes)], { type: params.mimeType });
+  form.append("file", blob, params.filename);
+  const res = await fetch(`${WHATSAPP_API}/${params.phoneNumberId}/media`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${params.accessToken}` },
+    body: form,
+  });
+  if (!res.ok) {
+    throw new Error(`WhatsApp media upload failed: ${await res.text()}`);
+  }
+  const json = (await res.json()) as { id?: string };
+  if (!json.id) throw new Error("WhatsApp media id missing");
+  return json.id;
+}
+
+export async function sendWhatsAppMediaMessage(params: {
+  phoneNumberId: string;
+  accessToken: string;
+  to: string;
+  kind: "image" | "video" | "audio";
+  mediaId: string;
+  caption?: string;
+  voiceNote?: boolean;
+}) {
+  const normalizedPhone = params.to.replace(/\D/g, "").replace(/^0/, "92");
+  const mediaBody =
+    params.kind === "audio"
+      ? { id: params.mediaId, ...(params.voiceNote ? { voice: true } : {}) }
+      : { id: params.mediaId, ...(params.caption ? { caption: params.caption } : {}) };
+  const response = await fetch(`${WHATSAPP_API}/${params.phoneNumberId}/messages`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${params.accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to: normalizedPhone,
+      type: params.kind,
+      [params.kind]: mediaBody,
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`WhatsApp ${params.kind} send failed: ${await response.text()}`);
+  }
+  return response.json();
+}
+
 export function renderTemplate(
   template: string,
   vars: Record<string, string | number>

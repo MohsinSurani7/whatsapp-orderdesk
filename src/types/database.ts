@@ -138,6 +138,7 @@ export interface WhatsAppConversation {
   customer_name: string | null;
   status: "active" | "awaiting_confirmation" | "closed" | "handed_off";
   pending_order_data: Record<string, unknown> | null;
+  agent_paused?: boolean;
   last_message_at: string;
   created_at: string;
 }
@@ -147,7 +148,7 @@ export interface WhatsAppMessage {
   business_id: string;
   conversation_id: string;
   direction: "inbound" | "outbound";
-  message_type: "text" | "image" | "document" | "template" | "audio" | "interactive";
+  message_type: "text" | "image" | "document" | "template" | "audio" | "interactive" | "video";
   content: string;
   whatsapp_message_id: string | null;
   metadata: Record<string, unknown> | null;

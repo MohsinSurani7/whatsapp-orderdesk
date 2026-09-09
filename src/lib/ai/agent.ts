@@ -132,6 +132,11 @@ export async function processAgentMessage(params: AgentParams): Promise<AgentRes
     };
   }
 
+  // Draft cancel: one clear reply, wipe pending. Never "flagged" + "no order exists".
+  if (isCancelRequest(params.message)) {
+    return draftCancelReply(params);
+  }
+
   const catalogNumberPick = resolveNumberedProductPick(
     params.message,
     params.conversationHistory,
@@ -170,15 +175,22 @@ export async function processAgentMessage(params: AgentParams): Promise<AgentRes
   if (lockedCheckout) return lockedCheckout;
 
   let working: AgentParams = params;
-  if (offered && !params.referredProduct) {
+  const lowerEarly = params.message.toLowerCase();
+  if (offered && !params.referredProduct && !wantsFullCatalog(lowerEarly, params.products)) {
     working = { ...params, referredProduct: offered };
   }
 
   const lowerMsg = working.message.toLowerCase();
-  const namedUpfront = findProductInText(lowerMsg, working.products) || working.referredProduct || offered || null;
+  const namedUpfront = wantsFullCatalog(lowerMsg, working.products)
+    ? null
+    : findProductInText(lowerMsg, working.products) || working.referredProduct || offered || null;
 
-  // Single-product details/photo → answer ONLY that product (no full catalog)
-  if (namedUpfront && isDetailOrPhotoAsk(lowerMsg) && !isBuyIntent(lowerMsg)) {
+  if (wantsFullCatalog(lowerMsg, working.products)) {
+    return fullCatalogReply(working);
+  }
+
+  // "mujhy full stack wala dikhao" → ONLY that product + photo
+  if (namedUpfront && isShowOrDetailAsk(lowerMsg) && !isBuyIntent(lowerMsg)) {
     const en = inferCustomerLanguage(working.message, working.conversationHistory) === "English";
     const sizes = parseSizeOptions(namedUpfront.sizes);
     return {
@@ -209,7 +221,7 @@ export async function processAgentMessage(params: AgentParams): Promise<AgentRes
             },
           ]
         : undefined,
-      skip_media: true,
+      skip_media: false,
     };
   }
 
@@ -270,15 +282,11 @@ export async function processAgentMessage(params: AgentParams): Promise<AgentRes
   result = attachProductMedia(result, working);
   result = withShopMenus(result, working);
 
-  const cancelAsk = isCancelRequest(working.message);
-  if (cancelAsk || needsStaffAttention(working.message) || result.intent === "human_handoff" || result.intent === "cancel_order") {
+  if (needsStaffAttention(working.message) && !isCancelRequest(working.message)) {
     result = {
       ...result,
       needs_human: true,
-      intent: cancelAsk ? "human_handoff" : result.intent === "cancel_order" ? "human_handoff" : "human_handoff",
-      reply: cancelAsk
-        ? appendCancelAck(result.reply, inferCustomerLanguage(working.message, working.conversationHistory))
-        : result.reply,
+      intent: "human_handoff",
     };
   }
   return result;
@@ -594,6 +602,90 @@ function lockProductForCheckout(params: AgentParams, product: CatalogProduct, qt
   };
 }
 
+function emptyPending(): ParsedOrderData {
+  return {
+    customer_name: null,
+    phone: null,
+    address: null,
+    products: [],
+    subtotal: null,
+    delivery_fee: null,
+    discount: null,
+    total: null,
+    payment_method: null,
+    payment_status: null,
+    notes: null,
+  };
+}
+
+function draftCancelReply(params: AgentParams): AgentResponse {
+  const en = inferCustomerLanguage(params.message, params.conversationHistory) === "English";
+  const hadDraft = Boolean(pendingProductName(params.pendingOrder));
+  return {
+    intent: "general",
+    reply: en
+      ? hadDraft
+        ? "Okay — that draft is cancelled. Nothing was placed. Send a catalog number or product name when you want to order."
+        : "There's no confirmed order to cancel. Send a catalog number or product name to start."
+      : hadDraft
+        ? "Theek hai — draft order cancel. Koi order place nahi hua. Naya order: catalog number ya product naam likhein."
+        : "Koi confirm order nahi tha. Order ke liye catalog number ya product naam likh dein.",
+    parsed_order: emptyPending(),
+    should_create_order: false,
+    order_id: null,
+    confidence: 1,
+    needs_human: false,
+    skip_media: true,
+  };
+}
+
+function wantsFullCatalog(message: string, products?: CatalogProduct[]) {
+  const t = message.toLowerCase();
+  if (findProductInText(t, products) && !/saary|saare|sari|tamam|all products|har product|poori (list|detail)/.test(t)) {
+    return false;
+  }
+  if (/\b(yeh?|is|usi|this)\b/.test(t) && /detail|photo|pic|dikha/.test(t) && !/saary|saare|all|tamam|har product/.test(t)) {
+    return false;
+  }
+  return (
+    isCatalogAsk(t) ||
+    /saary|saare|sari|tamam|all products|poori (list|detail)|har product|products? ki details?|details? (do|doo|den|send|bhej)|^catalog$/.test(
+      t
+    )
+  );
+}
+
+function isShowOrDetailAsk(lower: string) {
+  return (
+    isDetailOrPhotoAsk(lower) ||
+    /dikhao|dikha|dikha do|show me|show karo|photo bhej|pic bhej|image bhej|tasveer/.test(lower)
+  );
+}
+
+function fullCatalogReply(params: AgentParams): AgentResponse {
+  const products = params.products || [];
+  const images = products
+    .filter((p) => p.image_url)
+    .slice(0, 10)
+    .map((p) => ({
+      path: p.image_url as string,
+      caption: formatProductCard(p),
+      productName: p.name,
+      productId: p.id,
+      seeMore: needsSeeMore(p.description),
+    }));
+  return {
+    intent: "product_inquiry",
+    reply: catalogReply(params.businessName, products),
+    parsed_order: emptyPending(),
+    should_create_order: false,
+    order_id: null,
+    confidence: 1,
+    needs_human: false,
+    send_images: images.length ? images : undefined,
+  };
+}
+
 function isCancelRequest(message: string) {
   const t = message.toLowerCase();
   return /cancel|order cancel|cancel karo|cancel krdo|cancel kar do|cancel kar den|mera order cancel|don't want|nahi chahiye order/.test(
@@ -808,18 +900,7 @@ function continueLockedOrder(
   const awaiting = inferCheckoutAsk(pending, params.conversationHistory, params.products);
 
   if (leave === "cancel") {
-    return {
-      intent: "human_handoff",
-      reply: en
-        ? "Got it — I've flagged your cancel request. Our team will check the dashboard."
-        : "Theek hai — cancel request flag kar di. Team dashboard pe check karegi.",
-      parsed_order: pending,
-      should_create_order: false,
-      order_id: null,
-      confidence: 1,
-      needs_human: true,
-      skip_media: true,
-    };
+    return draftCancelReply(params);
   }
 
   if (opts?.force && opts.llmReply) {
@@ -926,7 +1007,9 @@ function continueLockedOrder(
 function isDetailOrPhotoAsk(lower: string) {
   return (
     isPhotoRequest(lower) ||
-    /detail|details|info|information|batao|bata|dikhao|dikha|tell me about|more about|description/.test(lower)
+    /detail|details|info|information|batao|bata|dikhao|dikha|show me|show karo|tell me about|more about|description|tasveer/.test(
+      lower
+    )
   );
 }
 
@@ -1053,9 +1136,13 @@ function emptyCatalogReply(businessName: string) {
 }
 
 function catalogReply(businessName: string, products?: CatalogProduct[]) {
-  const catalog = catalogLine(products);
+  const catalog = catalogSummary(products || [], 40);
   if (!catalog) return emptyCatalogReply(businessName);
-  return `${businessName} ke products:\n${catalog}\n\nJo lena ho naam + quantity likhein. Size wale item pe size bhi bata dein.`;
+  const extra =
+    (products || []).length > 40
+      ? `\n\nPehle 40 items. Baqi ke liye category naam likhein.`
+      : "";
+  return `${businessName} ke products:\n${catalog}${extra}\n\nJo lena ho uska NUMBER ya naam likhein (jaise 8).`;
 }
 
 function imagesForNames(products: CatalogProduct[] | undefined, names: string[]) {
@@ -1128,7 +1215,7 @@ LAST_ASSISTANT: ${JSON.stringify(lastAssistantContent(params.conversationHistory
 REPLY_IN: ${replyLang}
 LATEST_CUSTOMER_MESSAGE: ${params.message}`;
 
-  const history = (params.conversationHistory || []).slice(-16).map((m) => ({
+  const history = (params.conversationHistory || []).slice(-32).map((m) => ({
     role: m.role as "user" | "assistant",
     content: m.content,
   }));
@@ -1824,17 +1911,43 @@ function isPointingAtProduct(lower: string) {
 
 export function findProductInText(lower: string, products?: CatalogProduct[]) {
   if (!products?.length) return null;
+  const stop = new Set([
+    "product",
+    "products",
+    "detail",
+    "details",
+    "price",
+    "order",
+    "item",
+    "items",
+    "shop",
+    "send",
+    "please",
+    "with",
+    "from",
+    "this",
+    "that",
+    "have",
+    "want",
+    "nightwear",
+    "dress",
+    "women",
+  ]);
   const sorted = [...products].sort((a, b) => b.name.length - a.name.length);
+  const exact = sorted.find((p) => lower.includes(p.name.toLowerCase()));
+  if (exact) return exact;
   return (
-    sorted.find((p) => lower.includes(p.name.toLowerCase())) ||
-    sorted.find((p) =>
-      p.name
+    sorted.find((p) => {
+      const tokens = p.name
         .toLowerCase()
         .split(/\s+/)
-        .filter((w) => w.length > 3)
-        .some((w) => lower.includes(w))
-    ) ||
-    null
+        .map((w) => w.replace(/[^a-z0-9]/g, ""))
+        .filter((w) => w.length >= 4 && !stop.has(w));
+      if (!tokens.length) return false;
+      const hits = tokens.filter((w) => lower.includes(w)).length;
+      if (tokens.length === 1) return hits >= 1;
+      return hits >= 2;
+    }) || null
   );
 }
 
