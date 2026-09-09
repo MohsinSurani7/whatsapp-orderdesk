@@ -131,20 +131,181 @@ export async function processAgentMessage(params: AgentParams): Promise<AgentRes
     };
   }
 
-  // "2" / "number 3" → map to last numbered catalog product
-  const numberPick = resolveNumberedProductPick(params.message, params.conversationHistory, params.products);
-  let working: AgentParams = params;
-  if (numberPick) {
-    working = {
-      ...params,
-      message: `${params.message} (selected catalog #${numberPick.index}: ${numberPick.product.name})`,
-      referredProduct: numberPick.product,
+  // "2" as QUANTITY (sirf 1 chahye) must NOT become catalog product #1
+  const qtyReply = isQuantityReply(params.message, params.conversationHistory, params.pendingOrder);
+  const offered =
+    params.referredProduct ||
+    lastOfferedProduct(params.conversationHistory, params.products) ||
+    (pendingProductName(params.pendingOrder)
+      ? findProductInText(String(pendingProductName(params.pendingOrder)).toLowerCase(), params.products)
+      : null);
+
+  if (qtyReply != null && offered) {
+    const en = inferCustomerLanguage(params.message, params.conversationHistory) === "English";
+    const sizes = parseSizeOptions(offered.sizes);
+    const pending = mergeOrder(
+      params.pendingOrder,
+      {
+        customer_name: null,
+        phone: null,
+        address: null,
+        products: [
+          {
+            name: offered.name,
+            quantity: qtyReply,
+            variant: null,
+            unit_price: offered.price,
+          },
+        ],
+        subtotal: null,
+        delivery_fee: null,
+        discount: null,
+        total: null,
+        payment_method: null,
+        payment_status: null,
+        notes: sizes.length ? "size" : "naam",
+      },
+      params.products
+    );
+    const missing = nextMissingField(pending, params.products);
+    return {
+      intent: "place_order",
+      reply: en
+        ? `Perfect — ${qtyReply}x ${offered.name} (Rs.${offered.price} each).${
+            missing ? ` Please share your ${missing.prompt}.` : ' Reply "yes" to confirm the order.'
+          }`
+        : `Theek hai — ${qtyReply}x ${offered.name} (Rs.${offered.price}).${
+            missing ? ` Ab apna ${missing.prompt} bhej dein.` : ' Confirm ke liye "yes" likhein.'
+          }`,
+      parsed_order: missing ? { ...pending, notes: missing.key } : pending,
+      should_create_order: false,
+      order_id: null,
+      confidence: 1,
+      needs_human: false,
+      skip_media: true,
     };
   }
 
-  // Category word like shoes / bags from message
+  // Catalog number pick ONLY when not answering quantity for an already-chosen product
+  const catalogNumberPick = resolveNumberedProductPick(
+    params.message,
+    params.conversationHistory,
+    params.products
+  );
+  const answeringQtyForOffer =
+    Boolean(offered) &&
+    (/^\d{1,2}\s*[.!]?$/.test(params.message.trim()) ||
+      /sirf|only|chahye|chahiye|quantity|qty/.test(params.message.toLowerCase()));
+  const useCatalogPick = Boolean(catalogNumberPick) && !answeringQtyForOffer;
+
+  let working: AgentParams = params;
+  if (useCatalogPick && catalogNumberPick) {
+    working = {
+      ...params,
+      message: `${params.message} (selected catalog #${catalogNumberPick.index}: ${catalogNumberPick.product.name})`,
+      referredProduct: catalogNumberPick.product,
+    };
+  } else if (offered && !params.referredProduct) {
+    working = { ...params, referredProduct: offered };
+  }
+
+  const numberPickActive = Boolean(useCatalogPick && catalogNumberPick);
+
+  const lowerMsg = working.message.toLowerCase();
+  const namedUpfront = findProductInText(lowerMsg, working.products) || working.referredProduct || offered || null;
+
+  // Single-product details/photo → answer ONLY that product (no full catalog)
+  if (namedUpfront && isDetailOrPhotoAsk(lowerMsg) && !isBuyIntent(lowerMsg)) {
+    const en = inferCustomerLanguage(working.message, working.conversationHistory) === "English";
+    const sizes = parseSizeOptions(namedUpfront.sizes);
+    return {
+      intent: "product_inquiry",
+      reply: [
+        formatProductCard(namedUpfront, { full: true }),
+        sizes.length
+          ? en
+            ? `Available sizes: ${sizes.join(", ")}. Want to order? Tell me size + quantity.`
+            : `Available sizes: ${sizes.join(", ")}. Order ke liye size + quantity bataein.`
+          : en
+            ? "Want to order this? Tell me the quantity."
+            : "Isko lena hai to quantity bataein.",
+      ].join("\n\n"),
+      parsed_order: working.pendingOrder ? mergeOrder(working.pendingOrder, null, working.products) : null,
+      should_create_order: false,
+      order_id: null,
+      confidence: 1,
+      needs_human: false,
+      send_images: namedUpfront.image_url
+        ? [
+            {
+              path: namedUpfront.image_url,
+              caption: formatProductCard(namedUpfront),
+              productName: namedUpfront.name,
+              productId: namedUpfront.id,
+              seeMore: needsSeeMore(namedUpfront.description),
+            },
+          ]
+        : undefined,
+      skip_media: true,
+    };
+  }
+
+  // "ye product chahiye" / buy named item / catalog number pick → lock order, don't restart catalog
+  if (
+    namedUpfront &&
+    (numberPickActive ||
+      isBuyIntent(lowerMsg) ||
+      /yeh? (wala|wali|wale)|this one|isi|usi|lena|le lo|order/.test(lowerMsg))
+  ) {
+    const en = inferCustomerLanguage(working.message, working.conversationHistory) === "English";
+    const qty = extractQuantity(lowerMsg) || 1;
+    const sizes = parseSizeOptions(namedUpfront.sizes);
+    const pending = mergeOrder(
+      working.pendingOrder,
+      {
+        customer_name: null,
+        phone: null,
+        address: null,
+        products: [
+          {
+            name: namedUpfront.name,
+            quantity: qty,
+            variant: null,
+            unit_price: namedUpfront.price,
+          },
+        ],
+        subtotal: null,
+        delivery_fee: null,
+        discount: null,
+        total: null,
+        payment_method: null,
+        payment_status: null,
+        notes: sizes.length ? "size" : null,
+      },
+      working.products
+    );
+    const missing = nextMissingField(pending, working.products);
+    return {
+      intent: "place_order",
+      reply: en
+        ? `Got it — ${qty}x ${namedUpfront.name} (Rs.${namedUpfront.price}).${
+            missing ? ` Please share your ${missing.prompt}.` : ' Reply "yes" to confirm.'
+          }`
+        : `Theek hai — ${qty}x ${namedUpfront.name} (Rs.${namedUpfront.price}).${
+            missing ? ` Baraye meherbani apna ${missing.prompt} bhej dein.` : ' Confirm ke liye "yes" likhein.'
+          }`,
+      parsed_order: missing ? { ...pending, notes: missing.key } : pending,
+      should_create_order: false,
+      order_id: null,
+      confidence: 0.95,
+      needs_human: false,
+      skip_media: true,
+    };
+  }
+
+  // Category browse only when asking category list, not when a specific product is named
   const categoryHint = detectCategoryFromMessage(working.message, working.products);
-  if (categoryHint && !working.selectedCategory) {
+  if (categoryHint && !working.selectedCategory && !namedUpfront && !isBuyIntent(lowerMsg)) {
     working = { ...working, selectedCategory: categoryHint };
   }
 
@@ -235,12 +396,14 @@ function resolveNumberedProductPick(
   products?: CatalogProduct[]
 ): { index: number; product: CatalogProduct } | null {
   if (!products?.length) return null;
-  const m = message.trim().match(/^(?:no\.?|number|#|option|item)?\s*(\d{1,2})\s*[.)]?$/i);
+  const m = message.trim().match(/^(?:no\.?|number|#|option|item)?\s*(\d{1,2})\b/i);
   const n = m ? parseInt(m[1], 10) : null;
   if (!n || n < 1) return null;
 
   // Prefer last assistant numbered list
-  const lastAssistant = [...(history || [])].reverse().find((h) => h.role === "assistant" && /\d+\)/.test(h.content));
+  const lastAssistant = [...(history || [])]
+    .reverse()
+    .find((h) => h.role === "assistant" && /\d+\)/.test(h.content));
   if (lastAssistant) {
     const lines = lastAssistant.content.split(/\n/).map((l) => l.trim());
     for (const line of lines) {
@@ -266,6 +429,19 @@ function isCancelRequest(message: string) {
 }
 
 function withShopMenus(result: AgentResponse, params: AgentParams): AgentResponse {
+  if (result.skip_media) return result;
+  const lower = params.message.toLowerCase();
+  // Mid-order / single-product detail / buy → no category dump menus
+  if (
+    result.intent === "place_order" ||
+    result.intent === "confirm_order" ||
+    isBuyIntent(lower) ||
+    isDetailOrPhotoAsk(lower) ||
+    Boolean(params.referredProduct && !isCatalogAsk(lower))
+  ) {
+    return { ...result, quick_replies: undefined, list_menu: undefined };
+  }
+
   const products = params.products || [];
   const cats = uniqueCategories(products);
   const quick = result.quick_replies?.length
@@ -292,16 +468,21 @@ function withShopMenus(result: AgentResponse, params: AgentParams): AgentRespons
         }
       : undefined);
   const showMenus =
-    !result.skip_media &&
-    (result.intent === "greeting" ||
-      result.intent === "product_inquiry" ||
-      Boolean(params.selectedCategory) ||
-      isCatalogAsk(params.message.toLowerCase()));
+    result.intent === "greeting" ||
+    (isCatalogAsk(lower) && !findProductInText(lower, products)) ||
+    (Boolean(params.selectedCategory) && !findProductInText(lower, products) && !isBuyIntent(lower));
   return {
     ...result,
-    quick_replies: showMenus && !result.skip_media ? quick : result.quick_replies,
-    list_menu: showMenus && !result.skip_media ? list : result.list_menu,
+    quick_replies: showMenus ? quick : undefined,
+    list_menu: showMenus ? list : undefined,
   };
+}
+
+function isDetailOrPhotoAsk(lower: string) {
+  return (
+    isPhotoRequest(lower) ||
+    /detail|details|info|information|batao|bata|dikhao|dikha|tell me about|more about|description/.test(lower)
+  );
 }
 
 function attachProductMedia(result: AgentResponse, params: AgentParams): AgentResponse {
@@ -310,18 +491,86 @@ function attachProductMedia(result: AgentResponse, params: AgentParams): AgentRe
   if (!products.length) return result;
   const lower = params.message.toLowerCase();
   const named = findProductInText(lower, products) || params.referredProduct || null;
-  const categoryPick = params.selectedCategory
-    ? productsInCategory(products, params.selectedCategory)
-    : [];
-  const show =
-    Boolean(params.selectedCategory) ||
-    result.intent === "product_inquiry" ||
-    isCatalogAsk(lower) ||
-    isPhotoRequest(lower) ||
-    Boolean(result.send_images?.length);
-  if (!show) return result;
 
-  const pick = named ? [named] : categoryPick.length ? categoryPick.slice(0, 8) : products.slice(0, 8);
+  // If LLM already chose specific images, keep ONLY those (never expand to full catalog)
+  if (result.send_images?.length) {
+    const onlyNamed =
+      named && result.send_images.length > 1
+        ? result.send_images.filter(
+            (img) =>
+              img.productName?.toLowerCase() === named.name.toLowerCase() ||
+              img.caption.toLowerCase().includes(named.name.toLowerCase())
+          )
+        : result.send_images;
+    const scoped = onlyNamed.length ? onlyNamed : named && named.image_url
+      ? [
+          {
+            path: named.image_url,
+            caption: formatProductCard(named),
+            productName: named.name,
+            productId: named.id,
+            seeMore: needsSeeMore(named.description),
+          },
+        ]
+      : result.send_images.slice(0, 1);
+    return { ...result, reply: stripPhotoTalk(result.reply), send_images: scoped };
+  }
+
+  // Buying / placing order: at most one photo of the chosen item, never catalog dump
+  if (result.intent === "place_order" || result.intent === "confirm_order" || isBuyIntent(lower)) {
+    const target =
+      named ||
+      (result.parsed_order?.products?.[0]
+        ? findProductInText(result.parsed_order.products[0].name.toLowerCase(), products)
+        : null);
+    if (target?.image_url && (isPhotoRequest(lower) || isDetailOrPhotoAsk(lower))) {
+      return {
+        ...result,
+        reply: stripPhotoTalk(result.reply),
+        send_images: [
+          {
+            path: target.image_url,
+            caption: formatProductCard(target),
+            productName: target.name,
+            productId: target.id,
+            seeMore: needsSeeMore(target.description),
+          },
+        ],
+      };
+    }
+    return { ...result, reply: stripPhotoTalk(result.reply), send_images: undefined };
+  }
+
+  // Explicit details/photo for ONE product
+  if (named && isDetailOrPhotoAsk(lower)) {
+    return {
+      ...result,
+      reply: stripPhotoTalk(result.reply) || formatProductCard(named, { full: true }),
+      send_images: named.image_url
+        ? [
+            {
+              path: named.image_url,
+              caption: formatProductCard(named),
+              productName: named.name,
+              productId: named.id,
+              seeMore: needsSeeMore(named.description),
+            },
+          ]
+        : undefined,
+    };
+  }
+
+  // Full catalog / category browse only when they asked for list (not a single item)
+  const catalogBrowse = isCatalogAsk(lower) && !named;
+  const categoryBrowse =
+    Boolean(params.selectedCategory) && !named && !isBuyIntent(lower) && !isDetailOrPhotoAsk(lower);
+  if (!catalogBrowse && !categoryBrowse) {
+    return { ...result, reply: stripPhotoTalk(result.reply) };
+  }
+
+  const pick = categoryBrowse
+    ? productsInCategory(products, params.selectedCategory!).slice(0, 8)
+    : products.slice(0, 8);
   const images = pick
     .filter((p) => p.image_url)
     .map((p) => ({
@@ -331,11 +580,10 @@ function attachProductMedia(result: AgentResponse, params: AgentParams): AgentRe
       productId: p.id,
       seeMore: needsSeeMore(p.description),
     }));
-  const shortIntro = stripPhotoTalk(result.reply);
   return {
     ...result,
-    reply: shortIntro,
-    send_images: images.length ? images : result.send_images,
+    reply: stripPhotoTalk(result.reply),
+    send_images: images.length ? images : undefined,
   };
 }
 
@@ -367,17 +615,16 @@ function catalogReply(businessName: string, products?: CatalogProduct[]) {
 
 function imagesForNames(products: CatalogProduct[] | undefined, names: string[]) {
   const catalog = products || [];
-  const wanted = names.length
-    ? catalog.filter((p) =>
-        names.some(
-          (n) =>
-            p.name.toLowerCase() === n.toLowerCase() ||
-            p.name.toLowerCase().includes(n.toLowerCase()) ||
-            n.toLowerCase().includes(p.name.toLowerCase())
-        )
+  if (!names.length) return [];
+  return catalog
+    .filter((p) =>
+      names.some(
+        (n) =>
+          p.name.toLowerCase() === n.toLowerCase() ||
+          p.name.toLowerCase().includes(n.toLowerCase()) ||
+          n.toLowerCase().includes(p.name.toLowerCase())
       )
-    : catalog;
-  return wanted
+    )
     .filter((p) => p.image_url)
     .slice(0, 10)
     .map((p) => ({
@@ -427,11 +674,14 @@ CONVERSATION STYLE:
 CATALOG:
 - DASHBOARD_PRODUCTS is the only truth (numbered n=1,2,3...). Never invent products/prices.
 - "shoes hain?" → check category/name. If none, clearly say not available in dashboard.
-- Customer types only "2" → that is catalog item #2.
-- List with: 1) Name — Rs.price. Keep short. send_photos=true when showing products.
+- If you already asked quantity and customer says "sirf 1" / "1" / "1 chahiye", that is QUANTITY=1 for the CURRENT product — never switch to catalog item #1.
+- "Ye wala" after a product card means THAT product — continue the order (ask next missing field), do not resend full details dump unless asked.
+- If customer asks details/photo of ONE product → reply only about that product. send_photos=true and photo_product_names=[that one name ONLY]. NEVER send all product photos.
+- List with: 1) Name — Rs.price only when they ask catalog/category. Keep short.
 - Never write "sending photo" / "photo bhej raha hoon".
 
 ORDERS:
+- When customer says they want a product ("chahiye", "I want", "order"), lock that product into parsed_order.products and continue collecting size (if any), name, address, payment. Do not restart or dump menus.
 - Sizes required when product has sizes → ask, save variant "Size 8".
 - Collect: items+qty+size, name, address, payment. Confirm with yes before should_create_order=true.
 - Cancel request → intent cancel_order / human_handoff, needs_human=true.
@@ -566,19 +816,19 @@ LATEST_CUSTOMER_MESSAGE: ${params.message}`;
     ? parsed.intent
     : "general") as AgentIntent;
 
+  const namedForPhotos = findProductInText(params.message.toLowerCase(), params.products) || params.referredProduct;
   const wantPhotos =
-    Boolean(parsed.send_photos) ||
-    isPhotoRequest(params.message.toLowerCase()) ||
-    (intent === "product_inquiry" && !isSmallTalk(params.message.toLowerCase())) ||
-    Boolean(params.selectedCategory);
+    (Boolean(parsed.send_photos) || isPhotoRequest(params.message.toLowerCase()) || isDetailOrPhotoAsk(params.message.toLowerCase())) &&
+    intent !== "place_order" &&
+    intent !== "confirm_order";
   const photoNames = Array.isArray(parsed.photo_product_names)
-    ? (parsed.photo_product_names as unknown[]).map((n) => String(n))
-    : params.referredProduct
-      ? [params.referredProduct.name]
-      : params.selectedCategory
-        ? productsInCategory(params.products || [], params.selectedCategory).map((p) => p.name)
-        : [];
-  const send_images = wantPhotos ? imagesForNames(params.products, photoNames) : undefined;
+    ? (parsed.photo_product_names as unknown[]).map((n) => String(n)).filter(Boolean)
+    : namedForPhotos
+      ? [namedForPhotos.name]
+      : [];
+  // Never expand empty names to full catalog
+  const send_images =
+    wantPhotos && photoNames.length ? imagesForNames(params.products, photoNames.slice(0, 3)) : undefined;
 
   const confirmed = Boolean(parsed.should_create_order);
   const complete =
@@ -1146,16 +1396,56 @@ const URDU_QTY: Record<string, number> = {
 };
 
 function extractQuantity(lower: string): number | null {
-  const labeled = lower.match(/(?:quantity|qty|kitni|kitna)\s*[:=]?\s*(\d{1,4})/);
+  const labeled = lower.match(/(?:quantity|qty|kitni|kitna|sirf|only)\s*[:=]?\s*(\d{1,4})/);
   if (labeled) return parseInt(labeled[1], 10);
   const x = lower.match(/(\d{1,4})\s*(?:x|×|\*|pieces?|pcs|qty)/);
   if (x) return parseInt(x[1], 10);
-  const want = lower.match(/(\d{1,4})\s*(?:chahye|chahiye|chahiye)/);
-  if (want) return parseInt(want[1], 10);
+  const want = lower.match(/(\d{1,4})\s*(?:chahye|chahiye|chahiye|piece|pcs)?/);
+  if (want && /chahye|chahiye|sirf|only|quantity|qty|piece|pcs|x\b/.test(lower)) {
+    return parseInt(want[1], 10);
+  }
   for (const [word, n] of Object.entries(URDU_QTY)) {
     if (new RegExp(`\\b${word}\\b`).test(lower)) return n;
   }
   return null;
+}
+
+function isQuantityReply(message: string, history?: Array<{ role: string; content: string }>, pending?: Record<string, unknown> | null) {
+  const t = message.toLowerCase().trim();
+  const qty = extractQuantity(t);
+  const bareNum = t.match(/^(\d{1,4})\s*[.!]?$/);
+  const hasPendingProduct =
+    Array.isArray(pending?.products) && (pending!.products as unknown[]).length > 0;
+  const lastAskQty = [...(history || [])]
+    .reverse()
+    .find((m) => m.role === "assistant")
+    ?.content.toLowerCase()
+    .match(/quantity|kitni|kitna|kitne|how many|qty/);
+  if (qty != null && (hasPendingProduct || lastAskQty || /sirf|only|chahye|chahiye|quantity|qty/.test(t))) {
+    return qty;
+  }
+  if (bareNum && (hasPendingProduct || lastAskQty)) {
+    return parseInt(bareNum[1], 10);
+  }
+  return null;
+}
+
+function lastOfferedProduct(
+  history: Array<{ role: string; content: string }> | undefined,
+  products?: CatalogProduct[]
+) {
+  if (!products?.length) return null;
+  for (const m of [...(history || [])].reverse()) {
+    if (m.role !== "assistant") continue;
+    const hit = findProductInText(m.content.toLowerCase(), products);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+function pendingProductName(pending?: Record<string, unknown> | null) {
+  const list = Array.isArray(pending?.products) ? (pending!.products as Array<{ name?: string }>) : [];
+  return list[0]?.name || null;
 }
 
 function looksLikeAddress(text: string) {
