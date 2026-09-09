@@ -63,6 +63,12 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
         if (msg.type !== "text" && msg.type !== "image") continue;
         if (msg.type === "text" && !textBody) continue;
 
+        if (accessToken && phoneNumberId) {
+          await markMessageAsRead(phoneNumberId, accessToken, msg.id).catch((err) => {
+            console.error("WhatsApp mark-read failed:", err);
+          });
+        }
+
         const db = await readDb();
         if (db.messages.some((m) => m.whatsapp_message_id === msg.id)) continue;
 
@@ -129,13 +135,6 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
         });
         conversation.last_message_at = nowIso();
         await writeDb(db);
-
-        if (accessToken && phoneNumberId) {
-          await markMessageAsRead(phoneNumberId, accessToken, msg.id).catch(async (err) => {
-            console.error("WhatsApp mark-read failed:", err);
-            await recordWhatsAppError(business.id, String(err));
-          });
-        }
 
         if (!agentOn) {
           continue;
@@ -206,10 +205,22 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
           const conv = latest.conversations.find((c) => c.id === conversation!.id);
           if (conv) {
             conv.pending_order_data = agentResponse.parsed_order as unknown as Record<string, unknown>;
-            conv.status = "awaiting_confirmation";
+            conv.status = agentResponse.needs_human ? "handed_off" : "awaiting_confirmation";
             conv.last_message_at = nowIso();
             await writeDb(latest);
           }
+        } else if (agentResponse.needs_human) {
+          const latest = await readDb();
+          const conv = latest.conversations.find((c) => c.id === conversation!.id);
+          if (conv) {
+            conv.status = "handed_off";
+            conv.last_message_at = nowIso();
+            await writeDb(latest);
+          }
+        }
+
+        if (agentResponse.needs_human) {
+          await recordAttention(business.id, conversation.id, customerPhone, inboundText);
         }
 
         let replyText = agentResponse.reply;
@@ -422,6 +433,36 @@ async function createOrderFromAgent(
   });
   await writeDb(db);
   return orderId;
+}
+
+async function recordAttention(businessId: string, conversationId: string, phone: string, preview: string) {
+  const message = `${phone}: ${preview.slice(0, 180)}`;
+  try {
+    if (isSupabaseEnabled()) {
+      const sb = createAdminClient();
+      await sb.from("notifications").insert({
+        business_id: businessId,
+        title: "Attention required",
+        message,
+        type: "attention",
+        metadata: { conversation_id: conversationId },
+      });
+      return;
+    }
+    const db = await readDb();
+    db.notifications.push({
+      id: uid(),
+      business_id: businessId,
+      title: "Attention required",
+      message,
+      type: "attention",
+      read: false,
+      created_at: nowIso(),
+    });
+    await writeDb(db);
+  } catch (err) {
+    console.error("Failed to record attention:", err);
+  }
 }
 
 async function recordWhatsAppError(businessId: string, message: string) {

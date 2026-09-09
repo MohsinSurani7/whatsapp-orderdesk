@@ -68,15 +68,81 @@ function getAIClient(shopGroqKey?: string | null): { client: OpenAI; model: stri
 
 export async function processAgentMessage(params: AgentParams): Promise<AgentResponse> {
   const ai = getAIClient(params.groqApiKey);
+  let result: AgentResponse;
   if (ai) {
     try {
-      const result = await llmAgent(ai.client, ai.model, params);
-      if (result.reply.trim()) return result;
+      const llm = await llmAgent(ai.client, ai.model, params);
+      result = llm.reply.trim() ? llm : localAgent(params);
     } catch (error) {
       console.error("LLM agent failed, falling back to local rules:", error);
+      result = localAgent(params);
     }
+  } else {
+    result = localAgent(params);
   }
-  return localAgent(params);
+  result = attachProductMedia(result, params);
+  if (needsStaffAttention(params.message) || result.intent === "human_handoff") {
+    result = {
+      ...result,
+      needs_human: true,
+      intent: "human_handoff",
+    };
+  }
+  return result;
+}
+
+function formatProductCard(p: CatalogProduct) {
+  return [
+    `📦 *${p.name}*`,
+    `💰 Price: Rs.${p.price}`,
+    p.description ? `📝 ${p.description}` : null,
+    p.image_url ? "📷 Photo neeche bhej raha hoon" : null,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function catalogCardsText(products: CatalogProduct[]) {
+  return products.slice(0, 8).map(formatProductCard).join("\n\n");
+}
+
+function attachProductMedia(result: AgentResponse, params: AgentParams): AgentResponse {
+  const products = params.products || [];
+  if (!products.length) return result;
+  const lower = params.message.toLowerCase();
+  const named = findProductInText(lower, products);
+  const show =
+    result.intent === "product_inquiry" ||
+    result.intent === "greeting" ||
+    isCatalogAsk(lower) ||
+    isPhotoRequest(lower) ||
+    Boolean(result.send_images?.length);
+  if (!show) return result;
+
+  const pick = named ? [named] : products.slice(0, 8);
+  const images = pick
+    .filter((p) => p.image_url)
+    .map((p) => ({
+      path: p.image_url as string,
+      caption: formatProductCard(p),
+      productName: p.name,
+    }));
+  const cards = catalogCardsText(pick);
+  const alreadyRich = /\*/.test(result.reply) && /Rs\./.test(result.reply);
+  return {
+    ...result,
+    reply: alreadyRich ? result.reply : `${result.reply.trim()}\n\n${cards}`,
+    send_images: images.length ? images : result.send_images,
+  };
+}
+
+function needsStaffAttention(message: string) {
+  const t = message.toLowerCase();
+  return (
+    /insan se|human|operator|manager se baat|complaint|complain|fraud|scam|cheat|dhamki|police|court|refund nahi|bewaqoof|gali|mc\b|bc\b|bsdk|porn|sex|nude/.test(
+      t
+    ) || t.length > 400
+  );
 }
 
 function catalogLine(products?: CatalogProduct[]) {
@@ -96,7 +162,7 @@ function emptyCatalogReply(businessName: string) {
 function catalogReply(businessName: string, products?: CatalogProduct[]) {
   const catalog = catalogLine(products);
   if (!catalog) return emptyCatalogReply(businessName);
-  return `${businessName} ke available products:\n${catalog}\n\nOrder: product ka naam + quantity (jaise "2x Cotton Suit").\nPhotos: "photo bhejo".`;
+  return `${businessName} ke available products:\n${catalog}\n\nJo lena ho naam + quantity likhein (jaise "2x Cotton Suit"). Photos sath bhej raha hoon.`;
 }
 
 function imagesForNames(products: CatalogProduct[] | undefined, names: string[]) {
@@ -131,23 +197,23 @@ async function llmAgent(client: OpenAI, model: string, params: AgentParams): Pro
   }));
   const stats = params.orderStats;
   const system = `You are ${params.agentName}, WhatsApp sales assistant for "${params.businessName}" (Pakistan shop).
-Talk like a real helpful shop person: natural short Roman Urdu + simple English. Warm, clear, not robotic, no repeated menu spam.
+Talk like a real helpful shop person: natural Roman Urdu + simple English. Friendly, free conversation, satisfy the customer. Not a robot menu.
 
 RULES:
 - ONLY use products in DASHBOARD_PRODUCTS. Never invent items or prices.
 - If DASHBOARD_PRODUCTS is empty, honestly say catalog empty; malik must add products in dashboard. Do not take fake orders.
 - Use SHOP_NOTES for delivery charges, COD, timings, policies.
 - Use PENDING_ORDER to continue the same order (don't restart unless customer wants new order).
-- If customer asks list/details/kn kn products, list name + Rs price (+ description).
-- If they ask photos and has_photo is true, set send_photos true. If no photos, say photos not uploaded.
-- Collect a COMPLETE order ticket for the shop dashboard: items+qty+price, customer full name, WhatsApp/phone, full delivery address, payment method. These fields appear on Orders page — never skip them.
+- When showing products (greeting, list, details, "kya hai"), ALWAYS describe each item clearly: name, price Rs., description. Photos are sent automatically — set send_photos=true and photo_product_names to those product names. Do not tell the user to type "photo bhejo".
+- If customer is abusive, threatening, asking for a human, or the request is outside selling (scam/illegal), set intent to human_handoff, stay polite, say a team member will check the dashboard, and do not argue.
+- Collect a COMPLETE order ticket for the shop dashboard: items+qty+price, customer full name, WhatsApp/phone, full delivery address, payment method.
 - Collect step by step: items+qty, then naam, then address, then payment (COD/Easypaisa/JazzCash), then ask to confirm with "yes".
 - Put every collected field into parsed_order every turn (carry forward PENDING_ORDER).
 - should_create_order=true ONLY when items, naam, address, payment are all present AND customer confirmed.
-- Keep WhatsApp replies short (2-8 lines).
+- Keep WhatsApp replies useful, not empty. 4-12 lines is OK when listing products.
 
 Return ONLY JSON:
-{"reply":"string","intent":"greeting|product_inquiry|place_order|confirm_order|order_status|general|human_handoff","should_create_order":false,"send_photos":false,"photo_product_names":[],"parsed_order":{"customer_name":null,"phone":null,"address":null,"payment_method":null,"products":[{"name":"","quantity":1}],"notes":null}}`;
+{"reply":"string","intent":"greeting|product_inquiry|place_order|confirm_order|order_status|general|human_handoff","should_create_order":false,"send_photos":true,"photo_product_names":[],"needs_human":false,"parsed_order":{"customer_name":null,"phone":null,"address":null,"payment_method":null,"products":[{"name":"","quantity":1}],"notes":null}}`;
 
   const user = `DASHBOARD_PRODUCTS: ${JSON.stringify(catalogJson)}
 SHOP_NOTES: ${params.instructions || "(none)"}
@@ -166,7 +232,7 @@ LATEST_CUSTOMER_MESSAGE: ${params.message}`;
     {
       model,
       temperature: 0.4,
-      max_tokens: 500,
+      max_tokens: 700,
       response_format: { type: "json_object" },
       messages: [
         { role: "system", content: system },
@@ -219,7 +285,11 @@ LATEST_CUSTOMER_MESSAGE: ${params.message}`;
     ? parsed.intent
     : "general") as AgentIntent;
 
-  const wantPhotos = Boolean(parsed.send_photos) || isPhotoRequest(params.message.toLowerCase());
+  const wantPhotos =
+    Boolean(parsed.send_photos) ||
+    isPhotoRequest(params.message.toLowerCase()) ||
+    intent === "product_inquiry" ||
+    intent === "greeting";
   const photoNames = Array.isArray(parsed.photo_product_names)
     ? (parsed.photo_product_names as unknown[]).map((n) => String(n))
     : [];
@@ -239,7 +309,7 @@ LATEST_CUSTOMER_MESSAGE: ${params.message}`;
     should_create_order: confirmed && complete,
     order_id: null,
     confidence: 0.85,
-    needs_human: intent === "human_handoff",
+    needs_human: intent === "human_handoff" || Boolean(parsed.needs_human),
     send_images: send_images?.length ? send_images : undefined,
   };
 }
@@ -345,7 +415,7 @@ function localAgent(params: {
     return {
       intent: "greeting",
       reply: params.products?.length
-        ? `Assalam o Alaikum! ${params.businessName} mein ye available hai:\n${catalog}\n\nOrder: naam + quantity. Photos: "photo bhejo".`
+        ? `Assalam o Alaikum! ${params.businessName} mein ye available hai:\n${catalog}\n\nOrder ke liye naam + quantity likhein. Photos sath attached hain.`
         : emptyCatalogReply(params.businessName),
       parsed_order: null,
       confidence: 0.9,

@@ -1,8 +1,12 @@
 import { Sidebar } from "@/components/dashboard/sidebar";
 import { MobileNav } from "@/components/dashboard/mobile-nav";
+import { LiveRefresh } from "@/components/dashboard/live-refresh";
 import { requireBusiness } from "@/lib/auth/business";
 import { clearSessionCookie } from "@/lib/auth/session";
 import { redirect } from "next/navigation";
+
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 export default async function DashboardLayout({ children }: { children: React.ReactNode }) {
   const { business, user } = await requireBusiness();
@@ -18,7 +22,10 @@ export default async function DashboardLayout({ children }: { children: React.Re
       <Sidebar businessName={business.name} />
       <div className="lg:pl-64">
         <header className="sticky top-0 z-20 flex h-14 items-center justify-between border-b border-gray-200 bg-white px-4 sm:h-16 sm:px-6 lg:px-8">
-          <div className="ml-12 truncate text-sm font-medium text-gray-700 lg:ml-0">{business.name}</div>
+          <div className="ml-12 flex min-w-0 items-center gap-3 lg:ml-0">
+            <div className="truncate text-sm font-medium text-gray-700">{business.name}</div>
+            <LiveRefresh seconds={4} />
+          </div>
           <div className="flex items-center gap-3">
             <span className="hidden max-w-[160px] truncate text-sm text-gray-600 sm:inline">{user.email}</span>
             <form action={signOut}>

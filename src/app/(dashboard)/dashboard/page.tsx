@@ -28,6 +28,11 @@ export default async function DashboardPage() {
     (c) => c.business_id === businessId && c.status === "active"
   ).length;
   const todaySales = ordersToday.reduce((sum, o) => sum + Number(o.total), 0);
+  const attention = db.notifications
+    .filter((n) => n.business_id === businessId && !n.read && (n.type === "attention" || n.type === "error"))
+    .sort((a, b) => b.created_at.localeCompare(a.created_at))
+    .slice(0, 6);
+  const needsYou = db.conversations.filter((c) => c.business_id === businessId && c.status === "handed_off");
 
   const stats = [
     { label: "Today's Sales", value: formatCurrency(todaySales, business.currency), icon: TrendingUp, color: "text-green-600" },
@@ -47,6 +52,27 @@ export default async function DashboardPage() {
           <Button><Plus size={16} /> Create Order</Button>
         </Link>
       </div>
+
+      {(attention.length > 0 || needsYou.length > 0) && (
+        <Card className="border-amber-300 bg-amber-50">
+          <CardContent className="space-y-2 p-4">
+            <p className="font-semibold text-amber-900">Attention required</p>
+            <p className="text-sm text-amber-800">
+              {needsYou.length
+                ? `${needsYou.length} chat mein agent ko human help chahiye.`
+                : "Agent ne unusual / complaint message flag kiya."}
+            </p>
+            <ul className="space-y-1 text-sm text-amber-900">
+              {attention.slice(0, 4).map((n) => (
+                <li key={n.id}>• {n.title}: {n.message}</li>
+              ))}
+            </ul>
+            <Link href="/whatsapp/conversations" className="inline-block text-sm font-medium text-amber-900 underline">
+              Chats kholo
+            </Link>
+          </CardContent>
+        </Card>
+      )}
 
       <Card className={waHealth.ok ? "border-green-200 bg-green-50" : "border-red-300 bg-red-50"}>
         <CardContent className="flex items-center gap-4 p-4">
