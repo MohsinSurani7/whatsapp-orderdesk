@@ -44,32 +44,45 @@ function looksLikeRealKey(key?: string) {
   return /^(sk-|gsk_|AIza)/.test(key) || key.length > 24;
 }
 
-function getAIClient(shopGroqKey?: string | null): { client: OpenAI; model: string } | null {
+/** Groq retired llama-3.1-8b-instant (Aug 2026). Prefer current production models. */
+const GROQ_MODELS = [
+  process.env.GROQ_MODEL,
+  "openai/gpt-oss-20b",
+  "openai/gpt-oss-120b",
+  "llama-3.3-70b-versatile",
+].filter((m, i, arr): m is string => Boolean(m) && arr.indexOf(m) === i);
+
+function getAIClient(shopGroqKey?: string | null): { client: OpenAI; model: string; models: string[] } | null {
   const groq = (shopGroqKey || process.env.GROQ_API_KEY || "").trim();
   if (looksLikeRealKey(groq)) {
     return {
       client: new OpenAI({ apiKey: groq, baseURL: "https://api.groq.com/openai/v1" }),
-      model: process.env.GROQ_MODEL || "llama-3.1-8b-instant",
+      model: GROQ_MODELS[0],
+      models: GROQ_MODELS,
     };
   }
   const gemini = process.env.GEMINI_API_KEY;
   if (looksLikeRealKey(gemini)) {
+    const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
     return {
       client: new OpenAI({
         apiKey: gemini,
         baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/",
       }),
-      model: process.env.GEMINI_MODEL || "gemini-2.0-flash",
+      model,
+      models: [model],
     };
   }
   const key = process.env.AI_API_KEY || process.env.OPENAI_API_KEY;
   if (looksLikeRealKey(key)) {
+    const model = process.env.AI_MODEL || "gpt-4o-mini";
     return {
       client: new OpenAI({
         apiKey: key,
         baseURL: process.env.AI_BASE_URL || undefined,
       }),
-      model: process.env.AI_MODEL || "gpt-4o-mini",
+      model,
+      models: [model],
     };
   }
   return null;
@@ -139,7 +152,7 @@ export async function processAgentMessage(params: AgentParams): Promise<AgentRes
   let result: AgentResponse;
   if (ai) {
     try {
-      const llm = await llmAgent(ai.client, ai.model, working);
+      const llm = await llmAgent(ai.client, ai.models, working);
       if (!llm.reply.trim()) throw new Error("Empty Groq reply");
       result = llm;
     } catch (error) {
@@ -376,7 +389,7 @@ function imagesForNames(products: CatalogProduct[] | undefined, names: string[])
     }));
 }
 
-async function llmAgent(client: OpenAI, model: string, params: AgentParams): Promise<AgentResponse> {
+async function llmAgent(client: OpenAI, models: string[], params: AgentParams): Promise<AgentResponse> {
   const catalog = params.products || [];
   const catalogJson = catalog.map((p, i) => ({
     n: i + 1,
@@ -397,30 +410,31 @@ async function llmAgent(client: OpenAI, model: string, params: AgentParams): Pro
     .join(" | ");
   const historyTurns = (params.conversationHistory || []).length;
   const replyLang = inferCustomerLanguage(params.message, params.conversationHistory);
-  const system = `You are ${params.agentName}, the brain of WhatsApp shop "${params.businessName}".
-You are a real helpful salesperson powered by Groq. Think, understand the customer's message (including voice transcripts), then reply naturally.
+  const system = `You are ${params.agentName}, the AI brain of WhatsApp shop "${params.businessName}".
+Chat like ChatGPT / Groq chat: natural, helpful, smart. Answer the customer's exact question first.
 
 LANGUAGE (must follow):
 - Reply ONLY in: ${replyLang}
-- If customer uses English → English. Roman Urdu/Urdu → that. If they ask to switch language, switch immediately and stay there.
-- Never answer English questions in Urdu.
+- English question → English answer. Roman Urdu → Roman Urdu. Switch if they ask.
 
-CATALOG BRAIN:
-- DASHBOARD_PRODUCTS is the ONLY truth. Each item has number n (1,2,3...).
-- If customer asks "do you have shoes / shoes hain?" check category/name. If yes, list matching items with numbers. If NO matching product, clearly say it is NOT available in the shop dashboard — do not invent.
-- If customer replies with only a number like "2", that means catalog item #2 from your last list / DASHBOARD_PRODUCTS n=2.
-- When listing, use: 1) Name — Rs.price (short). Keep description short.
-- send_photos=true when showing products they asked about.
-
-CONVERSATION:
-- Free chat like a human. Answer the exact question. Do not restart with a menu dump.
-- Do not say "Main madad kar sakta hoon" + full catalog unless they asked what you can do.
+CONVERSATION STYLE:
+- Free chat. If they ask about discount, delivery, COD, timing, size, price, stock — answer directly like a human shopkeeper.
+- Use SHOP_NOTES for discount/delivery/COD policy. If notes don't mention discount, say honestly you can check with the shop / offer a small courtesy if reasonable, or say current prices are as listed — do NOT invent fake huge discounts.
+- NEVER reply with a canned menu like "I can help you / Main madad kar sakta hoon + full catalog" unless they asked what you sell or said hi with no other intent.
 - Thanks/ok → short ack only.
+- Do not restart the conversation or re-greet every turn. History has ${historyTurns} messages.
+
+CATALOG:
+- DASHBOARD_PRODUCTS is the only truth (numbered n=1,2,3...). Never invent products/prices.
+- "shoes hain?" → check category/name. If none, clearly say not available in dashboard.
+- Customer types only "2" → that is catalog item #2.
+- List with: 1) Name — Rs.price. Keep short. send_photos=true when showing products.
 - Never write "sending photo" / "photo bhej raha hoon".
-- Sizes required when product has sizes → ask and save variant "Size 8".
-- Cancel order requests → intent human_handoff, needs_human=true, be polite, say team will handle on dashboard.
-- Order ticket: items+qty+size, name, address, payment. Confirm with yes before should_create_order=true.
-- History has ${historyTurns} messages — continue context, don't re-greet.
+
+ORDERS:
+- Sizes required when product has sizes → ask, save variant "Size 8".
+- Collect: items+qty+size, name, address, payment. Confirm with yes before should_create_order=true.
+- Cancel request → intent cancel_order / human_handoff, needs_human=true.
 
 Return ONLY JSON:
 {"reply":"string","intent":"greeting|product_inquiry|place_order|confirm_order|cancel_order|order_status|general|human_handoff","should_create_order":false,"send_photos":false,"photo_product_names":[],"needs_human":false,"parsed_order":{"customer_name":null,"phone":null,"address":null,"payment_method":null,"products":[{"name":"","quantity":1,"variant":null}],"notes":null}}`;
@@ -441,22 +455,38 @@ LATEST_CUSTOMER_MESSAGE: ${params.message}`;
     content: m.content,
   }));
 
-  const completion = await client.chat.completions.create(
-    {
-      model,
-      temperature: 0.55,
-      max_tokens: 900,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: system },
-        ...history,
-        { role: "user", content: user },
-      ],
-    },
-    { timeout: 14000 }
-  );
+  const modelList = models.length ? models : ["openai/gpt-oss-20b"];
+  let raw = "{}";
+  let lastErr: unknown = null;
+  for (const model of modelList) {
+    try {
+      const completion = await client.chat.completions.create(
+        {
+          model,
+          temperature: 0.55,
+          max_tokens: 900,
+          response_format: { type: "json_object" },
+          messages: [
+            { role: "system", content: system },
+            ...history,
+            { role: "user", content: user },
+          ],
+        },
+        { timeout: 16000 }
+      );
+      raw = completion.choices[0]?.message?.content || "{}";
+      lastErr = null;
+      break;
+    } catch (err) {
+      lastErr = err;
+      const msg = String((err as { message?: string })?.message || err);
+      const retryable = /model_not_found|does not exist|404|not have access/i.test(msg);
+      console.error(`Groq model failed (${model}):`, msg.slice(0, 200));
+      if (!retryable) throw err;
+    }
+  }
+  if (lastErr) throw lastErr;
 
-  const raw = completion.choices[0]?.message?.content || "{}";
   let parsed: Record<string, unknown> = {};
   try {
     parsed = JSON.parse(raw) as Record<string, unknown>;
@@ -493,7 +523,6 @@ LATEST_CUSTOMER_MESSAGE: ${params.message}`;
       }
     : null;
 
-  // If user picked a number and LLM missed products, inject referred product
   let pending = mergeOrder(params.pendingOrder, extracted, params.products);
   if (params.referredProduct && !pending.products.length && /selected catalog|#\d+|^\d+$/i.test(params.message)) {
     pending = mergeOrder(
@@ -502,7 +531,14 @@ LATEST_CUSTOMER_MESSAGE: ${params.message}`;
         customer_name: null,
         phone: null,
         address: null,
-        products: [{ name: params.referredProduct.name, quantity: 1, variant: null, unit_price: params.referredProduct.price }],
+        products: [
+          {
+            name: params.referredProduct.name,
+            quantity: 1,
+            variant: null,
+            unit_price: params.referredProduct.price,
+          },
+        ],
         subtotal: null,
         delivery_fee: null,
         discount: null,
@@ -515,7 +551,18 @@ LATEST_CUSTOMER_MESSAGE: ${params.message}`;
     );
   }
 
-  const intent = (["greeting", "place_order", "confirm_order", "cancel_order", "order_status", "product_inquiry", "payment_inquiry", "delivery_inquiry", "general", "human_handoff"].includes(String(parsed.intent))
+  const intent = ([
+    "greeting",
+    "place_order",
+    "confirm_order",
+    "cancel_order",
+    "order_status",
+    "product_inquiry",
+    "payment_inquiry",
+    "delivery_inquiry",
+    "general",
+    "human_handoff",
+  ].includes(String(parsed.intent))
     ? parsed.intent
     : "general") as AgentIntent;
 
@@ -594,6 +641,27 @@ function localAgent(params: {
       should_create_order: false,
       order_id: null,
       needs_human: true,
+    };
+  }
+
+  if (/discount|off\b|sasta|kam price|offer|deal/.test(lower) && !buyAsk) {
+    const notes = (params.instructions || "").trim();
+    const fromNotes = /discount|offer|%/i.test(notes)
+      ? notes.split(/\n/).find((l) => /discount|offer|%/i.test(l)) || notes.slice(0, 180)
+      : null;
+    return {
+      intent: "general",
+      reply: en
+        ? fromNotes
+          ? `About discounts: ${fromNotes}`
+          : "Prices on the catalog are current. For a special discount I can flag the shop owner — tell me which item and quantity, and I'll note it."
+        : fromNotes
+          ? `Discount ke bare mein: ${fromNotes}`
+          : "Abhi listed prices chal rahe hain. Special discount ke liye bataein kaunsa item + quantity — main shop owner ko note forward kar dunga.",
+      parsed_order: previous.products.length ? previous : null,
+      confidence: 0.9,
+      ...empty,
+      skip_media: true,
     };
   }
 

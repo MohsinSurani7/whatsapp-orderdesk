@@ -212,8 +212,8 @@ export default function WhatsAppAgentPage() {
               </Button>
             </div>
             <p className="mt-1 text-xs text-gray-500">
-              Free key: console.groq.com → API Keys. Har buyer apni key yahan lagaye taake AI quota mix na ho. Llama 8B
-              Instant use hota hai — tez aur dashboard catalog se reply karta hai.
+              Free key: console.groq.com → API Keys. Model: <code>openai/gpt-oss-20b</code> (purana Llama 8B
+              retire ho chuka hai). Har buyer apni key yahan lagaye.
             </p>
           </div>
           <div>
@@ -286,8 +286,9 @@ export default function WhatsAppAgentPage() {
           <p>2. Upar <strong>Agent training notes</strong> mein delivery charges, sizes, COD rules likho.</p>
           <p>3. Customer WhatsApp pe bolega “suit chahiye” — agent catalog se match karega.</p>
           <p className="text-xs text-gray-500">
-            Agent replies Groq Llama (fast free open-source) se aati hain jab Netlify pe GROQ_API_KEY laga ho. Catalog
-            hamesha is dashboard ke Products + notes se aata hai.
+            Agent replies Groq <code>openai/gpt-oss-20b</code> se aati hain (ChatGPT-style free chat). Catalog
+            hamesha is dashboard ke Products + notes se aata hai. Purana{" "}
+            <code>llama-3.1-8b-instant</code> retire ho chuka tha — isi wajah se pehle canned “madad” reply aa raha tha.
           </p>
         </CardContent>
       </Card>
