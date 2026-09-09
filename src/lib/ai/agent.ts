@@ -186,6 +186,10 @@ export async function processAgentMessage(params: AgentParams): Promise<AgentRes
     };
   }
 
+  // Locked checkout: Groq must NOT greet / restart catalog while collecting name/address/payment
+  const lockedCheckout = continueLockedOrder(params);
+  if (lockedCheckout) return lockedCheckout;
+
   // Catalog number pick ONLY when not answering quantity for an already-chosen product
   const catalogNumberPick = resolveNumberedProductPick(
     params.message,
@@ -251,11 +255,16 @@ export async function processAgentMessage(params: AgentParams): Promise<AgentRes
   }
 
   // "ye product chahiye" / buy named item / catalog number pick → lock order, don't restart catalog
+  const alreadyLockedSame =
+    Boolean(pendingProductName(working.pendingOrder)) &&
+    namedUpfront &&
+    String(pendingProductName(working.pendingOrder)).toLowerCase() === namedUpfront.name.toLowerCase();
   if (
     namedUpfront &&
+    !alreadyLockedSame &&
     (numberPickActive ||
       isBuyIntent(lowerMsg) ||
-      /yeh? (wala|wali|wale)|this one|isi|usi|lena|le lo|order/.test(lowerMsg))
+      /yeh? (wala|wali|wale)|this one|isi|usi|le lo|order karo|order karna|place order/.test(lowerMsg))
   ) {
     const en = inferCustomerLanguage(working.message, working.conversationHistory) === "English";
     const qty = extractQuantity(lowerMsg) || 1;
@@ -309,9 +318,12 @@ export async function processAgentMessage(params: AgentParams): Promise<AgentRes
     working = { ...working, selectedCategory: categoryHint };
   }
 
+  const checkoutOpen = Boolean(pendingProductName(working.pendingOrder));
   const ai = getAIClient(working.groqApiKey);
   let result: AgentResponse;
-  if (ai) {
+  if (checkoutOpen) {
+    result = localAgent(working);
+  } else if (ai) {
     try {
       const llm = await llmAgent(ai.client, ai.models, working);
       if (!llm.reply.trim()) throw new Error("Empty Groq reply");
@@ -338,6 +350,11 @@ export async function processAgentMessage(params: AgentParams): Promise<AgentRes
     ...result,
     reply: stripPhotoTalk(result.reply),
   };
+
+  // If LLM greets / asks "which product" while an order is already open, ignore it
+  const rescued = continueLockedOrder(working, { force: true, llmReply: result });
+  if (rescued) result = rescued;
+
   result = attachProductMedia(result, working);
   result = withShopMenus(result, working);
 
@@ -431,8 +448,10 @@ function isCancelRequest(message: string) {
 function withShopMenus(result: AgentResponse, params: AgentParams): AgentResponse {
   if (result.skip_media) return result;
   const lower = params.message.toLowerCase();
+  const orderOpen = Boolean(pendingProductName(params.pendingOrder) || result.parsed_order?.products?.length);
   // Mid-order / single-product detail / buy → no category dump menus
   if (
+    orderOpen ||
     result.intent === "place_order" ||
     result.intent === "confirm_order" ||
     isBuyIntent(lower) ||
@@ -475,6 +494,224 @@ function withShopMenus(result: AgentResponse, params: AgentParams): AgentRespons
     ...result,
     quick_replies: showMenus ? quick : undefined,
     list_menu: showMenus ? list : undefined,
+  };
+}
+
+function lastAssistantContent(history?: Array<{ role: string; content: string }>) {
+  return [...(history || [])].reverse().find((m) => m.role === "assistant")?.content || "";
+}
+
+function inferCheckoutAsk(
+  pending: ParsedOrderData,
+  history: Array<{ role: string; content: string }> | undefined,
+  catalog?: CatalogProduct[]
+): "naam" | "address" | "payment" | "size" | null {
+  const fromNotes = lastAssistantAsk(pending);
+  if (fromNotes) return fromNotes;
+  const last = lastAssistantContent(history).toLowerCase();
+  if (/size\b/.test(last) && /bata|share|which|ka size/.test(last)) return "size";
+  if (/poora naam|full name|sirf naam|apna naam/.test(last)) return "naam";
+  if (/delivery address|apna address|share.*address/.test(last) && !/payment/.test(last)) return "address";
+  if (/payment method|cod|easypaisa|jazzcash/.test(last) && /share|bata|bhej/.test(last)) return "payment";
+  return nextMissingField(pending, catalog)?.key ?? null;
+}
+
+function wantsToLeaveCheckout(message: string) {
+  const t = message.toLowerCase();
+  if (isCancelRequest(t)) return "cancel" as const;
+  if (
+    isCatalogAsk(t) ||
+    /dusra product|doosra|another item|another product|change product|naya product/.test(t)
+  ) {
+    return "browse" as const;
+  }
+  return null;
+}
+
+function checkoutSnapshot(order: ParsedOrderData, en: boolean) {
+  const items = order.products
+    .map((p) => `${p.quantity}x ${p.name}${p.variant ? ` (${p.variant})` : ""}${p.unit_price != null ? ` — Rs.${p.unit_price}` : ""}`)
+    .join(", ");
+  if (en) {
+    return [
+      `Order so far: ${items || "—"}`,
+      order.customer_name ? `Name: ${order.customer_name}` : null,
+      order.address ? `Address: ${order.address}` : null,
+      order.payment_method ? `Payment: ${order.payment_method}` : null,
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+  return [
+    `Order: ${items || "—"}`,
+    order.customer_name ? `Naam: ${order.customer_name}` : null,
+    order.address ? `Address: ${order.address}` : null,
+    order.payment_method ? `Payment: ${order.payment_method}` : null,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function paymentPrompt(params: AgentParams, en: boolean) {
+  const wallets = [
+    params.easypaisaNumber ? `Easypaisa ${params.easypaisaNumber}` : null,
+    params.jazzcashNumber ? `JazzCash ${params.jazzcashNumber}` : null,
+  ].filter(Boolean);
+  const extra = wallets.length ? ` (${wallets.join(", ")})` : "";
+  return en
+    ? `payment method — COD / Easypaisa / JazzCash${extra}`
+    : `payment method (COD / Easypaisa / JazzCash)${extra}`;
+}
+
+function continueLockedOrder(
+  params: AgentParams,
+  opts?: { force?: boolean; llmReply?: AgentResponse }
+): AgentResponse | null {
+  const leave = wantsToLeaveCheckout(params.message);
+  if (leave === "browse") return null;
+
+  let pending = mergeOrder(params.pendingOrder, null, params.products);
+  if (!pending.products.length) {
+    const offered =
+      params.referredProduct || lastOfferedProduct(params.conversationHistory, params.products);
+    const hist = params.conversationHistory || [];
+    const askedCheckout = hist.some(
+      (m) =>
+        m.role === "assistant" &&
+        /poora naam|full name|sirf naam|got it —|theek hai —|1x |please share your|baraye meherbani apna/.test(
+          m.content.toLowerCase()
+        )
+    );
+    const alreadyDone = hist.some(
+      (m) =>
+        m.role === "assistant" &&
+        /order #|confirm ho gaya|order confirmed|create ho gaya/.test(m.content.toLowerCase())
+    );
+    if (!offered || !askedCheckout || alreadyDone) {
+      if (!opts?.force) return null;
+      return null;
+    }
+    const qtyFromAsk = [...hist]
+      .reverse()
+      .find((m) => m.role === "assistant" && /\d+\s*x\s+/i.test(m.content))
+      ?.content.match(/(\d+)\s*x\s+/i);
+    pending = mergeOrder(
+      pending,
+      {
+        customer_name: null,
+        phone: null,
+        address: null,
+        products: [
+          {
+            name: offered.name,
+            quantity: qtyFromAsk ? parseInt(qtyFromAsk[1], 10) : 1,
+            variant: null,
+            unit_price: offered.price,
+          },
+        ],
+        subtotal: null,
+        delivery_fee: null,
+        discount: null,
+        total: null,
+        payment_method: null,
+        payment_status: null,
+        notes: null,
+      },
+      params.products
+    );
+  }
+
+  const en = inferCustomerLanguage(params.message, params.conversationHistory) === "English";
+  const awaiting = inferCheckoutAsk(pending, params.conversationHistory, params.products);
+
+  if (leave === "cancel") {
+    return {
+      intent: "human_handoff",
+      reply: en
+        ? "Got it — I've flagged your cancel request. Our team will check the dashboard."
+        : "Theek hai — cancel request flag kar di. Team dashboard pe check karegi.",
+      parsed_order: pending,
+      should_create_order: false,
+      order_id: null,
+      confidence: 1,
+      needs_human: true,
+      skip_media: true,
+    };
+  }
+
+  if (opts?.force && opts.llmReply) {
+    const t = opts.llmReply.reply.toLowerCase();
+    const offScript =
+      /how can i help|kis product|which product|kya chahiye|assalam o alaikum|welcome back|aap kis product/.test(t) ||
+      opts.llmReply.intent === "greeting";
+    const llmFilled =
+      Boolean(opts.llmReply.parsed_order?.customer_name) ||
+      Boolean(opts.llmReply.parsed_order?.address) ||
+      Boolean(opts.llmReply.parsed_order?.payment_method);
+    if (!offScript && llmFilled && opts.llmReply.intent === "place_order") {
+      return null;
+    }
+    if (!offScript && opts.llmReply.intent === "confirm_order") return null;
+  }
+
+  const extracted = parseOrderFromText(
+    params.message,
+    params.products,
+    awaiting,
+    params.referredProduct || lastOfferedProduct(params.conversationHistory, params.products)
+  );
+  pending = mergeOrder(pending, extracted, params.products);
+
+  const confirming = ["yes", "haan", "han", "ok", "theek", "confirm", "done", "bilkul"].some(
+    (w) => params.message.toLowerCase().split(/\s+/).includes(w) || params.message.toLowerCase().trim() === w
+  );
+  const complete = !nextMissingField(pending, params.products);
+
+  if (confirming && complete) {
+    return {
+      intent: "confirm_order",
+      reply: en
+        ? "Thank you — order confirmed. We'll process it shortly."
+        : "Shukriya! Order confirm ho gaya. Hum jald process karenge.",
+      parsed_order: { ...pending, notes: null },
+      should_create_order: true,
+      order_id: null,
+      confidence: 1,
+      needs_human: false,
+      skip_media: true,
+    };
+  }
+
+  const missing = nextMissingField(pending, params.products);
+  const snap = checkoutSnapshot(pending, en);
+  if (missing) {
+    const prompt =
+      missing.key === "payment" ? paymentPrompt(params, en) : missing.prompt;
+    return {
+      intent: "place_order",
+      reply: en
+        ? `${snap}\n\nPlease share your ${prompt}.`
+        : `${snap}\n\nAb apna ${prompt} bhej dein.`,
+      parsed_order: { ...pending, notes: missing.key },
+      should_create_order: false,
+      order_id: null,
+      confidence: 1,
+      needs_human: false,
+      skip_media: true,
+    };
+  }
+
+  return {
+    intent: "place_order",
+    reply: en
+      ? `${snap}\n\nReply "yes" to confirm this order.`
+      : `${snap}\n\nConfirm ke liye "yes" likhein.`,
+    parsed_order: { ...pending, notes: null },
+    should_create_order: false,
+    order_id: null,
+    confidence: 1,
+    needs_human: false,
+    skip_media: true,
   };
 }
 
@@ -1345,7 +1582,7 @@ function nextMissingField(
   return null;
 }
 
-function lastAssistantAsk(pending?: Record<string, unknown> | null): "naam" | "address" | "payment" | "size" | null {
+function lastAssistantAsk(pending?: Record<string, unknown> | ParsedOrderData | null): "naam" | "address" | "payment" | "size" | null {
   const notes = String(pending?.notes || "");
   if (notes === "naam" || notes === "address" || notes === "payment" || notes === "size") return notes;
   return null;
@@ -1468,21 +1705,26 @@ function extractPayment(lower: string): ParsedOrderData["payment_method"] {
 
 function extractName(text: string, awaitingName: boolean): string | null {
   const labeled = text.match(
-    /(?:mera naam|my name(?: is)?|name\s*[:=]|main)\s+([A-Za-z\u0600-\u06FF][A-Za-z\u0600-\u06FF\s.'-]{1,40})/i
+    /(?:mera naam|mera name|my name(?: is)?|name\s*[:=]|i am|i'm)\s+([A-Za-z\u0600-\u06FF][A-Za-z\u0600-\u06FF\s.'-]{1,40})/i
   );
   if (labeled) {
-    const name = cleanPersonName(labeled[1]);
+    const name = cleanPersonName(labeled[1].split(/\b(?:aur|and|tum|kyun|ku)\b/i)[0]);
     if (name) return name;
   }
   if (!awaitingName) return null;
-  if (looksLikeAddress(text) || looksLikePayment(text)) return null;
-  if (extractQuantity(text.toLowerCase())) return null;
+  if (looksLikePayment(text) && looksLikeAddress(text) && !/naam|name/i.test(text)) return null;
+  if (extractQuantity(text.toLowerCase()) && isBuyIntent(text.toLowerCase())) return null;
+  const head = text.split(/\b(?:aur|and|,)\b/i)[0];
+  if (looksLikeAddress(head) || looksLikePayment(head)) return null;
   const cleaned = cleanPersonName(
-    text.replace(/^(mera naam|my name is|i am|main)\s+/i, "").replace(/\b(hai|hoon|hun)\b/gi, "")
+    head
+      .replace(/^(mera naam|mera name|my name is|i am|i'm|main)\s+/i, "")
+      .replace(/\b(hai|hoon|hun)\b/gi, "")
   );
   if (!cleaned) return null;
   const words = cleaned.split(/\s+/);
   if (words.length > 5 || cleaned.length > 40) return null;
+  if (/\b(order|product|address|payment|chahye|chahiye)\b/i.test(cleaned)) return null;
   return cleaned;
 }
 
@@ -1516,18 +1758,24 @@ function extractAddress(text: string, awaitingAddress: boolean): string | null {
   if (awaitingAddress && extractName(text, false) && text.split(/\s+/).length <= 4 && !looksLikeAddress(text)) {
     return null;
   }
-  const cleaned = text
+  let cleaned = text;
+  const afterLabel = cleaned.split(/\baddress\b\s*(?:mera|:|yeh? hai)?/i)[1];
+  if (afterLabel && afterLabel.trim().length >= 4) cleaned = afterLabel;
+  cleaned = cleaned
+    .replace(/payment method[\s\S]*?(?=\baddress\b|$)/gi, " ")
+    .replace(/\b(cash on delivery|cod|easypaisa|jazzcash)\b/gi, " ")
     .replace(/yeh? hai mera address/gi, "")
     .replace(/mera address (yeh? hai|:)?/gi, "")
     .replace(/address\s*[:=]/gi, "")
-    .replace(/\b(hai|please|plz)\b/gi, " ")
+    .replace(/['"]/g, " ")
+    .replace(/\b(hai|please|plz|aur)\b/gi, " ")
     .replace(/\s+/g, " ")
     .trim();
   return cleaned || null;
 }
 
 function mergeOrder(
-  pending: Record<string, unknown> | null | undefined,
+  pending: Record<string, unknown> | ParsedOrderData | null | undefined,
   extracted: ParsedOrderData | null,
   products?: CatalogProduct[]
 ): ParsedOrderData {
@@ -1623,7 +1871,9 @@ export function parseOrderFromText(
   const collectingDetails = awaiting === "naam" || awaiting === "address" || awaiting === "payment";
   const collectingSize = awaiting === "size";
   const useReferred = Boolean(referredProduct) && (!collectingDetails || qty != null || isPointingAtProduct(lower));
-  const chosen = findProductInText(lower, products) || (useReferred ? referredProduct : null);
+  const chosen = collectingDetails
+    ? null
+    : findProductInText(lower, products) || (useReferred ? referredProduct : null);
   const address = extractAddress(text, awaiting === "address");
   const name = extractName(text, awaiting === "naam");
   const size = extractSizeForProduct(text, chosen, products, collectingSize);
