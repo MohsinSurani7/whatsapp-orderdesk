@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { formatCurrency } from "@/lib/utils";
-import { Plus, ImageIcon, Pencil, Trash2, X } from "lucide-react";
+import { Plus, ImageIcon, Pencil, Trash2, X, Link2 } from "lucide-react";
 
 type Product = {
   id: string;
@@ -25,6 +25,9 @@ export default function ProductsPage() {
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<Product | null>(null);
   const [saving, setSaving] = useState(false);
+  const [importUrl, setImportUrl] = useState("");
+  const [importing, setImporting] = useState(false);
+  const [importMsg, setImportMsg] = useState<string | null>(null);
 
   async function load() {
     const res = await fetch("/api/products");
@@ -64,13 +67,39 @@ export default function ProductsPage() {
     setShowForm(true);
   }
 
+  async function importFromWebsite() {
+    const url = importUrl.trim();
+    if (!url) return;
+    setImporting(true);
+    setImportMsg(null);
+    const res = await fetch("/api/products/import-url", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+    const data = await res.json();
+    setImporting(false);
+    if (!res.ok) {
+      setImportMsg(data.error || "Import fail ho gaya");
+      return;
+    }
+    setImportMsg(
+      `${data.added || 0} products add hue` +
+        (data.found != null ? ` (${data.found} page se mile)` : "") +
+        (data.skipped ? `, ${data.skipped} skip (pehle se the)` : "") +
+        (data.note ? `. ${data.note}` : "")
+    );
+    setImportUrl("");
+    load();
+  }
+
   return (
     <div className="space-y-6 pb-20 lg:pb-0">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Products</h1>
           <p className="text-sm text-gray-500">
-            Category aur sizes (jaise Shoes, 1-10) add karein — WhatsApp agent isi data se poochhega aur order pe save karega.
+            Manual add, ya apni website ka products page link paste karke Groq se auto-import.
           </p>
         </div>
         <Button
@@ -83,6 +112,36 @@ export default function ProductsPage() {
           <Plus size={16} /> Add Product
         </Button>
       </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <Link2 size={18} /> Import from website link
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <p className="text-sm text-gray-600">
+            Apni shop/products page ka URL dein. System name + price + description + photo ko same product card se
+            match karta hai — galat mix avoid. Agar photo unsure ho to blank chhor deta hai (Edit se add kar lo).
+          </p>
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <Input
+              value={importUrl}
+              onChange={(e) => setImportUrl(e.target.value)}
+              placeholder="https://yourshop.com/products"
+              className="flex-1"
+            />
+            <Button type="button" disabled={importing || importUrl.trim().length < 8} onClick={importFromWebsite}>
+              {importing ? "Importing..." : "Fetch & add"}
+            </Button>
+          </div>
+          {importMsg && <p className="text-sm text-gray-700">{importMsg}</p>}
+          <p className="text-xs text-gray-500">
+            Best: catalog/shop page. Multi-page catalog ho to har page alag import karo (duplicates skip). Import ke
+            baad jaldi se photos/prices dekh lo — Edit se easily fix ho jata hai.
+          </p>
+        </CardContent>
+      </Card>
 
       {showForm && (
         <Card>
@@ -200,7 +259,7 @@ export default function ProductsPage() {
         {!products.length && (
           <Card className="col-span-full">
             <CardContent className="py-12 text-center text-sm text-gray-500">
-              Abhi koi product nahi. Add Product dabao, photo ke sath save karo.
+              Abhi koi product nahi. Upar website link se import karo, ya Add Product dabao.
             </CardContent>
           </Card>
         )}
