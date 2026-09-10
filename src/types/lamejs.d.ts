@@ -5,3 +5,18 @@ declare module "lamejs" {
     flush(): Int8Array;
   }
 }
+
+declare module "lamejs/src/js/MPEGMode.js" {
+  const MPEGMode: unknown;
+  export default MPEGMode;
+}
+
+declare module "lamejs/src/js/Lame.js" {
+  const Lame: unknown;
+  export default Lame;
+}
+
+declare module "lamejs/src/js/BitStream.js" {
+  const BitStream: unknown;
+  export default BitStream;
+}

@@ -143,19 +143,55 @@ export async function processAgentMessage(params: AgentParams): Promise<AgentRes
     return storeNameReply(params);
   }
 
+  if (isIdentityAsk(params.message)) {
+    return identityReply(params);
+  }
+
+  const photoOrDetail = isPhotoRequest(params.message.toLowerCase()) || isShowOrDetailAsk(params.message.toLowerCase());
   const catalogNumberPick = resolveNumberedProductPick(
     params.message,
     params.conversationHistory,
     params.products
   );
+  if (catalogNumberPick && "invalid" in catalogNumberPick && catalogNumberPick.invalid) {
+    return invalidCatalogNumberReply(params, catalogNumberPick.index);
+  }
   const lastWasCatalogList = assistantHadNumberedCatalog(params.conversationHistory);
   const lastAskQty = lastAssistantAskedQuantity(params.conversationHistory);
 
-  // "8" / "8 number wala" after a numbered catalog = THAT product (qty 1), never 8x some other item
-  const revising = String(params.pendingOrder?.notes || "") === "revise";
   if (
     catalogNumberPick &&
-    (isCatalogIndexPhrase(params.message) || (!revising && lastWasCatalogList))
+    catalogNumberPick.product &&
+    photoOrDetail &&
+    !isBuyIntent(params.message.toLowerCase())
+  ) {
+    const hit = catalogNumberPick.product;
+    return {
+      intent: "product_inquiry",
+      reply: formatProductCard(hit, { full: true }),
+      parsed_order: params.pendingOrder ? mergeOrder(params.pendingOrder, null, params.products) : null,
+      should_create_order: false,
+      order_id: null,
+      confidence: 1,
+      needs_human: false,
+      send_images: hit.image_url
+        ? [
+            {
+              path: hit.image_url,
+              caption: formatProductCard(hit),
+              productName: hit.name,
+              productId: hit.id,
+              seeMore: needsSeeMore(hit.description),
+            },
+          ]
+        : undefined,
+    };
+  }
+
+  const revising = String(params.pendingOrder?.notes || "") === "revise";
+  if (
+    catalogNumberPick?.product &&
+    (isCatalogIndexPhrase(params.message) || (!revising && lastWasCatalogList) || /product\s*\d+/i.test(params.message))
   ) {
     const qtyInMsg = extractQuantity(params.message);
     if (qtyInMsg) return lockProductForCheckout(params, catalogNumberPick.product, qtyInMsg, { fresh: true });
@@ -335,45 +371,82 @@ function detectCategoryFromMessage(message: string, products?: CatalogProduct[])
   return null;
 }
 
+function stripCatalogLineName(raw: string) {
+  return raw
+    .replace(/\s*[—–-]\s*Rs\.?[\s\d.,]+.*$/i, "")
+    .replace(/\s+Rs\.?[\s\d.,]+.*$/i, "")
+    .replace(/\s*·\s*size\s+.*$/i, "")
+    .trim();
+}
+
+function presentedCatalogProducts(
+  history: Array<{ role: string; content: string }> | undefined,
+  products?: CatalogProduct[]
+): CatalogProduct[] | null {
+  if (!products?.length) return null;
+  const last = lastAssistantContent(history);
+  const rows = [...last.matchAll(/^\s*(\d+)\s*[).]\s+(.+)$/gm)];
+  if (rows.length < 2) return null;
+  const byIndex: CatalogProduct[] = [];
+  for (const row of rows) {
+    const n = parseInt(row[1], 10);
+    if (!n) continue;
+    const name = stripCatalogLineName(row[2]);
+    const exact = products.find((p) => p.name.toLowerCase() === name.toLowerCase());
+    if (exact) byIndex[n - 1] = exact;
+  }
+  return byIndex.length ? byIndex : null;
+}
+
 function resolveNumberedProductPick(
   message: string,
   history: Array<{ role: string; content: string }> | undefined,
   products?: CatalogProduct[]
-): { index: number; product: CatalogProduct } | null {
+): { index: number; product: CatalogProduct } | { index: number; product: null; invalid: true } | null {
   if (!products?.length) return null;
   const t = message.trim();
   const m =
-    t.match(/(?:^|\b)(?:no\.?|number|#|option|item)?\s*(\d{1,2})\s*(?:number|no\.?|#)?\s*(?:wala|wali|wale)?/i) ||
-    t.match(/^(\d{1,2})\s*[.!]?$/);
+    t.match(/(?:product|item|option|number|no\.?|#)\s*(\d{1,2})\b/i) ||
+    t.match(/^(\d{1,2})\s*(?:number|no\.?|#)?\s*(?:wala|wali|wale)?[.!]?$/i) ||
+    t.match(/\b(\d{1,2})\s*(?:number|no\.?|#)\s*(?:wala|wali|wale)?/i) ||
+    t.match(/\b(\d{1,2})\s*(?:ki|ka|ke)?\s*(?:photo|tasveer|pic|image|detail)/i);
   const n = m ? parseInt(m[1], 10) : null;
   if (!n || n < 1) return null;
 
-  const lastAssistant = [...(history || [])]
-    .reverse()
-    .find((h) => h.role === "assistant" && /^\s*\d+\)/m.test(h.content));
-  if (lastAssistant) {
-    const lines = lastAssistant.content.split(/\n/).map((l) => l.trim());
-    for (const line of lines) {
-      const hit = line.match(/^(\d+)\)\s*(.+)$/);
-      if (hit && parseInt(hit[1], 10) === n) {
-        const name = hit[2]
-          .replace(/\s*[—–-]\s*Rs\.?.*$/i, "")
-          .replace(/\s+Rs\.?.*$/i, "")
-          .trim();
-        const product =
-          products.find((p) => p.name.toLowerCase() === name.toLowerCase()) ||
-          findProductInText(name.toLowerCase(), products);
-        if (product) return { index: n, product };
-      }
-    }
-  }
-  if (n <= products.length) return { index: n, product: products[n - 1] };
-  return null;
+  const presented = presentedCatalogProducts(history, products);
+  const live = products.slice(0, 40);
+  const lastWasList = assistantHadNumberedCatalog(history);
+  const explicit = isCatalogIndexPhrase(t) || /product\s*\d+|item\s*\d+|#\s*\d+/i.test(t);
+  const bare = /^\d{1,2}[.!]?\s*$/.test(t);
+
+  if (bare && !lastWasList) return null;
+
+  const list = presented && lastWasList ? presented : explicit || lastWasList ? live : null;
+  if (!list) return null;
+  const product = list[n - 1];
+  if (!product) return { index: n, product: null, invalid: true };
+  return { index: n, product };
+}
+
+function invalidCatalogNumberReply(params: AgentParams, index: number): AgentResponse {
+  const en = inferCustomerLanguage(params.message, params.conversationHistory) === "English";
+  return {
+    intent: "product_inquiry",
+    reply: en
+      ? `Number ${index} is not in the current catalog. Here's the list again.\n\n${catalogReply(params.businessName, params.products)}`
+      : `Ye number (${index}) current catalog mein available nahi hai. Products ki list dobara:\n\n${catalogReply(params.businessName, params.products)}`,
+    parsed_order: params.pendingOrder ? mergeOrder(params.pendingOrder, null, params.products) : emptyPending(),
+    should_create_order: false,
+    order_id: null,
+    confidence: 1,
+    needs_human: false,
+    skip_media: true,
+  };
 }
 
 function assistantHadNumberedCatalog(history?: Array<{ role: string; content: string }>) {
   const last = lastAssistantContent(history);
-  return (last.match(/^\s*\d+\)/gm) || []).length >= 2;
+  return (last.match(/^\s*\d+\s*[).]/gm) || []).length >= 2;
 }
 
 function lastAssistantAskedQuantity(history?: Array<{ role: string; content: string }>) {
@@ -383,7 +456,11 @@ function lastAssistantAskedQuantity(history?: Array<{ role: string; content: str
 }
 
 function isCatalogIndexPhrase(message: string) {
-  return /\d+\s*(?:number|no\.?|#)\s*(?:wala|wali|wale)?|\bitem\s*\d+|\boption\s*\d+/i.test(message);
+  return (
+    /\d+\s*(?:number|no\.?|#)\s*(?:wala|wali|wale)?/i.test(message) ||
+    /\b(?:item|option|product)\s*\d+/i.test(message) ||
+    /^\d{1,2}\s*(?:wala|wali|wale)[.!]?$/i.test(message.trim())
+  );
 }
 
 function isRejection(message: string) {
@@ -443,12 +520,42 @@ function storeNameReply(params: AgentParams): AgentResponse {
   };
 }
 
+function isIdentityAsk(message: string) {
+  const t = message.trim().toLowerCase();
+  if (isStoreNameAsk(t)) return false;
+  if (isBuyIntent(t) || isCatalogAsk(t)) return false;
+  if (/\b(mera naam|my name is|i am)\b/.test(t) && !/\b(apna|tumhara|your)\b/.test(t)) return false;
+  return (
+    /\bapn[aeiyy]+\s+(naam|name)\b/.test(t) ||
+    /tumhara (naam|name)|tera naam|aap ka (naam|name)|your name|what(?:'s| is) your name/.test(t) ||
+    /tum kaun|tum kn|aap kaun|aap kn|who are you|agent ho|bot ho/.test(t)
+  );
+}
+
+function identityReply(params: AgentParams): AgentResponse {
+  const en = inferCustomerLanguage(params.message, params.conversationHistory) === "English";
+  const keep = mergeOrder(params.pendingOrder, null, params.products);
+  const cancelled = checkoutWasCancelled(params.conversationHistory) || !keep.products.length;
+  return {
+    intent: "general",
+    reply: en
+      ? `I'm the XStream-Store-Pk WhatsApp assistant. I help customers browse products and place orders.`
+      : `Main XStream-Store-Pk ka WhatsApp assistant hoon. Main products dikhane aur orders lene mein help karta hoon.`,
+    parsed_order: cancelled ? emptyPending() : keep,
+    should_create_order: false,
+    order_id: null,
+    confidence: 1,
+    needs_human: false,
+    skip_media: true,
+  };
+}
+
 function isChitChatNotOrder(message: string) {
   const t = message.trim().toLowerCase();
   if (!t) return false;
   if (isBuyIntent(t) || isCatalogAsk(t) || isConfirmYes(t) || isSoftNo(t) || isCancelRequest(t)) return false;
   if (isCatalogIndexPhrase(t) || /^\d{1,2}[.!]?\s*$/.test(t)) return false;
-  if (isStoreNameAsk(t)) return true;
+  if (isIdentityAsk(t) || isStoreNameAsk(t)) return true;
   if (isSmallTalk(t)) return true;
   return (
     /tum kaun|tum kn|aap kaun|aap kn|who are you|what(?:'s| is) your name|agent ho|bot ho/.test(t) ||
@@ -866,7 +973,7 @@ function fullCatalogReply(params: AgentParams): AgentResponse {
 
 function isCancelRequest(message: string) {
   const t = message.toLowerCase().trim();
-  if (/^(stop|rehne do|rehny do)[\s!.]*$/.test(t)) return true;
+  if (/^(stop|rehne do|rehny do|choro|chhoro|leave it)[\s!.]*$/.test(t)) return true;
   if (/^(nahi chahiye|nhi chahiye)[\s!.]*$/.test(t)) return true;
   return /cancel|order cancel|cancel karo|cancel krdo|cancel kar do|cancel kar den|mera order cancel|don't want|nahi chahiye order/.test(
     t
@@ -1029,61 +1136,26 @@ function continueLockedOrder(
   }
 
   let pending = hydratePending(params, mergeOrder(params.pendingOrder, null, params.products));
-  if (!pending.products.length) {
-    if (checkoutWasCancelled(params.conversationHistory)) return null;
-    // "Hello" after a draft must NOT start a new checkout that forgets name/address.
-    if (isSmallTalk(params.message) && !opts?.force) return null;
-    const offered =
-      params.referredProduct || lastOfferedProduct(params.conversationHistory, params.products);
-    const hist = params.conversationHistory || [];
-    const askedCheckout = hist.some(
-      (m) =>
-        m.role === "assistant" &&
-        /poora naam|full name|sirf naam|got it —|theek hai —|1x |please share your|baraye meherbani apna/.test(
-          m.content.toLowerCase()
-        )
-    );
-    const alreadyDone = hist.some(
-      (m) =>
-        m.role === "assistant" &&
-        /order #|confirm ho gaya|order confirmed|create ho gaya/.test(m.content.toLowerCase())
-    );
-    if (!offered || !askedCheckout || alreadyDone) {
-      if (!opts?.force) return null;
-      return null;
-    }
-    const qtyFromAsk = [...hist]
-      .reverse()
-      .find((m) => m.role === "assistant" && /\d+\s*x\s+/i.test(m.content))
-      ?.content.match(/(\d+)\s*x\s+/i);
-    pending = mergeOrder(
-      pending,
-      {
-        customer_name: null,
-        phone: null,
-        address: null,
-        products: [
-          {
-            name: offered.name,
-            quantity: qtyFromAsk ? parseInt(qtyFromAsk[1], 10) : 1,
-            variant: null,
-            unit_price: offered.price,
-          },
-        ],
-        subtotal: null,
-        delivery_fee: null,
-        discount: null,
-        total: null,
-        payment_method: null,
-        payment_status: null,
-        notes: null,
-      },
-      params.products
-    );
+  const en = inferCustomerLanguage(params.message, params.conversationHistory) === "English";
+  const cartEditEarly = applyCartEdit(params.message, pending, params.products);
+  if (cartEditEarly) {
+    pending = hydratePending(params, { ...pending, products: cartEditEarly.products });
+    const missingCart = nextMissingField(pending, params.products);
+    return {
+      intent: "place_order",
+      action: cartEditEarly.action,
+      reply: en ? cartEditEarly.replyEn : cartEditEarly.replyUr,
+      parsed_order: missingCart ? { ...pending, notes: missingCart.key } : pending,
+      should_create_order: false,
+      order_id: null,
+      confidence: 1,
+      needs_human: false,
+      skip_media: true,
+    };
   }
+  if (!pending.products.length) return null;
 
   pending = hydratePending(params, pending);
-  const en = inferCustomerLanguage(params.message, params.conversationHistory) === "English";
   if (String(pending.notes || "") === "qty" && pending.products.length) {
     const q = extractQuantity(params.message.toLowerCase()) || (params.message.trim().match(/^(\d{1,4})\s*[.!]?$/) ? parseInt(params.message.trim(), 10) : null);
     const prod = (params.products || []).find(
@@ -1104,22 +1176,6 @@ function continueLockedOrder(
         skip_media: true,
       };
     }
-  }
-  const cartEdit = applyCartEdit(params.message, pending, params.products);
-  if (cartEdit) {
-    pending = hydratePending(params, { ...pending, products: cartEdit.products });
-    const missingCart = nextMissingField(pending, params.products);
-    return {
-      intent: "place_order",
-      action: cartEdit.action,
-      reply: en ? cartEdit.replyEn : cartEdit.replyUr,
-      parsed_order: missingCart ? { ...pending, notes: missingCart.key } : pending,
-      should_create_order: false,
-      order_id: null,
-      confidence: 1,
-      needs_human: false,
-      skip_media: true,
-    };
   }
   if (String(pending.notes || "") === "revise") {
     if (isConfirmYes(params.message) && orderLooksComplete(pending, params.products)) {
@@ -1497,8 +1553,9 @@ async function llmAgent(client: OpenAI, models: string[], params: AgentParams): 
   const user = `DASHBOARD_PRODUCTS: ${JSON.stringify(catalogJson)}
 SHOP_NOTES: ${[XSTREAM_STORE_FACTS, params.instructions].filter(Boolean).join("\n")}
 WALLET_NUMBERS: ${wallets || "(not set)"}
-CUSTOMER_WHATSAPP_NAME: ${params.customerName || "(unknown)"}
+CUSTOMER_WHATSAPP_NAME: ${params.customerName || "(unknown)"} (NOT the order name — never copy into parsed_order.customer_name)
 PENDING_ORDER: ${JSON.stringify(params.pendingOrder || null)}
+RULE: PENDING_ORDER.products is the only cart. If it is empty/null, there is NO checkout. Do not recover products, name, or address from LAST_ASSISTANT or chat history.
 REFERRED_PRODUCT: ${params.referredProduct ? JSON.stringify(params.referredProduct) : "null"}
 SELECTED_CATEGORY: ${params.selectedCategory || "null"}
 ORDER_STATS: ${stats ? JSON.stringify(stats) : "null"}
@@ -1508,7 +1565,7 @@ LAST_ASSISTANT: ${JSON.stringify(lastAssistantContent(params.conversationHistory
 REPLY_IN: ${replyLang}
 LATEST_CUSTOMER_MESSAGE: ${params.message}`;
 
-  const history = (params.conversationHistory || []).slice(-32).map((m) => ({
+  const history = (params.conversationHistory || []).slice(-12).map((m) => ({
     role: m.role as "user" | "assistant",
     content: m.content,
   }));
@@ -1559,7 +1616,7 @@ LATEST_CUSTOMER_MESSAGE: ${params.message}`;
   if (!reply) throw new Error("Empty LLM reply");
 
   const rawOrder = (parsed.parsed_order || null) as Record<string, unknown> | null;
-  const extracted: ParsedOrderData | null = rawOrder
+  let extracted: ParsedOrderData | null = rawOrder
     ? {
         customer_name: (rawOrder.customer_name as string) || null,
         phone: (rawOrder.phone as string) || null,
@@ -1582,16 +1639,40 @@ LATEST_CUSTOMER_MESSAGE: ${params.message}`;
       }
     : null;
 
-  let pending = mergeOrder(params.pendingOrder, extracted, params.products);
-  if (isBogusName(pending.customer_name)) {
-    pending = { ...pending, customer_name: null };
-  }
+  const hadCart = mergeOrder(params.pendingOrder, null, params.products).products.length > 0;
+  const awaitingLlm = lastAssistantAsk(params.pendingOrder);
   const catalogPick = resolveNumberedProductPick(
     params.message,
     params.conversationHistory,
     params.products
   );
-  if (catalogPick && assistantHadNumberedCatalog(params.conversationHistory)) {
+  const startedNow =
+    isBuyIntent(params.message) ||
+    Boolean(catalogPick && catalogPick.product) ||
+    Boolean(findProductInText(params.message.toLowerCase(), params.products) && isBuyIntent(params.message));
+  if (extracted && !hadCart && !startedNow) {
+    extracted = {
+      ...extracted,
+      products: [],
+      customer_name: awaitingLlm === "naam" ? extracted.customer_name : null,
+      address: awaitingLlm === "address" ? extracted.address : null,
+      payment_method: awaitingLlm === "payment" ? extracted.payment_method : null,
+    };
+  }
+  if (
+    extracted?.customer_name &&
+    params.customerName &&
+    extracted.customer_name.trim().toLowerCase() === params.customerName.trim().toLowerCase() &&
+    awaitingLlm !== "naam"
+  ) {
+    extracted = { ...extracted, customer_name: null };
+  }
+
+  let pending = mergeOrder(params.pendingOrder, extracted, params.products);
+  if (isBogusName(pending.customer_name)) {
+    pending = { ...pending, customer_name: null };
+  }
+  if (catalogPick?.product && assistantHadNumberedCatalog(params.conversationHistory) && startedNow) {
     pending = mergeOrder(
       pending,
       {
@@ -1613,32 +1694,6 @@ LATEST_CUSTOMER_MESSAGE: ${params.message}`;
         payment_method: pending.payment_method,
         payment_status: pending.payment_status,
         notes: pending.notes,
-      },
-      params.products
-    );
-  }
-  if (params.referredProduct && !pending.products.length && /selected catalog|#\d+|^\d+$/i.test(params.message)) {
-    pending = mergeOrder(
-      params.pendingOrder,
-      {
-        customer_name: null,
-        phone: null,
-        address: null,
-        products: [
-          {
-            name: params.referredProduct.name,
-            quantity: 1,
-            variant: null,
-            unit_price: params.referredProduct.price,
-          },
-        ],
-        subtotal: null,
-        delivery_fee: null,
-        discount: null,
-        total: null,
-        payment_method: null,
-        payment_status: null,
-        notes: null,
       },
       params.products
     );
@@ -2300,22 +2355,26 @@ export function findProductInText(lower: string, products?: CatalogProduct[]) {
     "dress",
     "women",
   ]);
+  const byId = products.find((p) => p.id && String(p.id).length >= 4 && lower.includes(String(p.id).toLowerCase()));
+  if (byId) return byId;
+  const bySku = products.find((p) => p.sku && String(p.sku).length >= 3 && lower.includes(String(p.sku).toLowerCase()));
+  if (bySku) return bySku;
   const sorted = [...products].sort((a, b) => b.name.length - a.name.length);
-  const exact = sorted.find((p) => lower.includes(p.name.toLowerCase()));
-  if (exact) return exact;
-  return (
-    sorted.find((p) => {
-      const tokens = p.name
-        .toLowerCase()
-        .split(/\s+/)
-        .map((w) => w.replace(/[^a-z0-9]/g, ""))
-        .filter((w) => w.length >= 4 && !stop.has(w));
-      if (!tokens.length) return false;
-      const hits = tokens.filter((w) => lower.includes(w)).length;
-      if (tokens.length === 1) return hits >= 1;
-      return hits >= 2;
-    }) || null
-  );
+  const exact = sorted.filter((p) => p.name.length >= 3 && lower.includes(p.name.toLowerCase()));
+  if (exact.length) return exact[0];
+  const fuzzy = sorted.filter((p) => {
+    const tokens = p.name
+      .toLowerCase()
+      .split(/\s+/)
+      .map((w) => w.replace(/[^a-z0-9]/g, ""))
+      .filter((w) => w.length >= 4 && !stop.has(w));
+    if (!tokens.length) return false;
+    const hits = tokens.filter((w) => lower.includes(w)).length;
+    if (tokens.length === 1) return hits >= 1;
+    return hits >= 2;
+  });
+  if (fuzzy.length === 1) return fuzzy[0];
+  return null;
 }
 
 const URDU_QTY: Record<string, number> = {
@@ -2398,14 +2457,14 @@ function looksLikePayment(text: string) {
 }
 
 function extractPayment(lower: string): ParsedOrderData["payment_method"] {
-  if (/\bcod\b/.test(lower) || /cash on delivery/.test(lower)) return "cod";
+  if (/\bcod\b/.test(lower) || /cash on delivery/.test(lower) || /\bcash\b/.test(lower)) return "cod";
   if (/easypaisa/.test(lower)) return "easypaisa";
   if (/jazzcash/.test(lower)) return "jazzcash";
-  if (/\bcash\b/.test(lower)) return "cash";
   return null;
 }
 
 function extractName(text: string, awaitingName: boolean): string | null {
+  if (isIdentityAsk(text) || isStoreNameAsk(text)) return null;
   const labeled = text.match(
     /(?:mera naam|mera name|my name(?: is)?|name\s*[:=]|i am|i'm)\s+([A-Za-z\u0600-\u06FF][A-Za-z\u0600-\u06FF\s.'-]{1,40})/i
   );
@@ -2561,9 +2620,11 @@ function applyCartEdit(
   replyUr: string;
 } | null {
   const t = message.toLowerCase().trim();
-  if (!pending.products.length && !/cart dikhao|view cart|cart dikha/.test(t)) return null;
+  const cartShow = /cart dikhao|view cart|cart dikha|cart batao/.test(t);
+  const cartClear = /clear cart|cart clear|cart khali|sab hata do|sari items hata/.test(t);
+  if (!pending.products.length && !cartShow && !cartClear) return null;
   if (isConfirmYes(message) || isCancelRequest(message)) return null;
-  if (/cart dikhao|view cart|cart dikha|cart batao/.test(t)) {
+  if (cartShow) {
     const list = formatCartLines(pending.products);
     return {
       products: pending.products,
@@ -2572,13 +2633,27 @@ function applyCartEdit(
       replyUr: `Aap ka cart:\n${list || "khali"}`,
     };
   }
-  if (/clear cart|cart khali|sab hata do|sari items hata/.test(t)) {
+  if (cartClear) {
     return {
       products: [],
       action: "clear_cart",
       replyEn: "Cart cleared. Send a product name to start again.",
       replyUr: "Cart khali kar diya. Naya product naam likhein.",
     };
+  }
+  const numberedRemove = t.match(/^(\d{1,2})\s*(?:number\s*)?(?:wala\s*)?(?:remove|hata)/i);
+  if (numberedRemove) {
+    const idx = parseInt(numberedRemove[1], 10) - 1;
+    const line = pending.products[idx];
+    if (line) {
+      const next = pending.products.filter((_, i) => i !== idx);
+      return {
+        products: next,
+        action: "remove_from_cart",
+        replyEn: `Removed ${line.name}.\n${formatCartLines(next) || "Cart empty."}`,
+        replyUr: `${line.name} hata di.\n${formatCartLines(next) || "Cart khali hai."}`,
+      };
+    }
   }
   const named = findProductInText(t, catalog);
   if (named && /hata do|hata den|remove|nikal do|delete/.test(t)) {
@@ -2609,11 +2684,12 @@ function extraVariantFromExtracted(_extracted: ParsedOrderData): string | null {
 
 function matchCatalog(order: ParsedOrderData, products?: CatalogProduct[]): ParsedOrderData {
   const mapped = order.products.map((item) => {
-    const hit = products?.find(
-      (p) =>
-        item.name.toLowerCase().includes(p.name.toLowerCase()) ||
-        p.name.toLowerCase().includes(item.name.toLowerCase())
-    );
+    const name = String(item.name || "").toLowerCase();
+    const hit =
+      products?.find((p) => item.product_id && p.id === item.product_id) ||
+      products?.find((p) => item.sku && p.sku && p.sku === item.sku) ||
+      products?.find((p) => p.name.toLowerCase() === name) ||
+      findProductInText(name, products);
     if (!hit) return item;
     return {
       ...item,

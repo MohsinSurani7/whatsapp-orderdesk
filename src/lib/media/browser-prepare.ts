@@ -73,8 +73,24 @@ function mixToMono(buf: AudioBuffer) {
 }
 
 async function pcmToMp3(samples: Float32Array, sampleRate: number): Promise<Blob> {
-  const lame = await import("lamejs");
-  const Mp3Encoder = lame.Mp3Encoder;
+  const g = globalThis as typeof globalThis & {
+    MPEGMode?: unknown;
+    Lame?: unknown;
+    BitStream?: unknown;
+  };
+  const [mpegModeMod, lameMod, bitStreamMod, lamePkg] = await Promise.all([
+    import("lamejs/src/js/MPEGMode.js"),
+    import("lamejs/src/js/Lame.js"),
+    import("lamejs/src/js/BitStream.js"),
+    import("lamejs"),
+  ]);
+  g.MPEGMode = (mpegModeMod as { default?: unknown }).default ?? mpegModeMod;
+  g.Lame = (lameMod as { default?: unknown }).default ?? lameMod;
+  g.BitStream = (bitStreamMod as { default?: unknown }).default ?? bitStreamMod;
+  const Mp3Encoder = (lamePkg as { Mp3Encoder?: new (c: number, r: number, k: number) => {
+    encodeBuffer: (s: Int16Array) => Int8Array;
+    flush: () => Int8Array;
+  } }).Mp3Encoder;
   if (!Mp3Encoder) throw new Error("MP3 encoder missing");
   const encoder = new Mp3Encoder(1, sampleRate, 64);
   const int16 = new Int16Array(samples.length);

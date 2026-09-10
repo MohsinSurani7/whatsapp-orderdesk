@@ -126,6 +126,53 @@ async function run() {
     groqApiKey: "skip",
     message: "2",
   });
+  const identityAsk = await processAgentMessage({
+    ...base,
+    pendingOrder: payPending,
+    customerName: "WhatsApp Profile",
+    groqApiKey: "skip",
+    message: "hi apna name btao",
+  });
+  const nineCatalog = Array.from({ length: 9 }, (_, i) => ({
+    id: `n${i + 1}`,
+    name: i === 5 ? "Item Six" : i === 8 ? "Item Nine" : `Item ${i + 1}`,
+    price: 100 + i,
+    description: "x",
+  }));
+  nineCatalog[5] = { id: "n6", name: "Item Six", price: 106, description: "x" };
+  nineCatalog[8] = { id: "n9", name: "Item Nine", price: 109, description: "x" };
+  const nineList = nineCatalog.map((p, i) => `${i + 1}) ${p.name} — Rs.${p.price}`).join("\n");
+  const numberedHist = [{ role: "assistant" as const, content: nineList }];
+  const pickRealNine = await processAgentMessage({
+    conversationHistory: numberedHist,
+    businessName: "XStream-Store-Pk",
+    agentName: "Order Desk",
+    products: nineCatalog,
+    pendingOrder: null,
+    customerName: "Baloch",
+    groqApiKey: "skip",
+    message: "9",
+  });
+  const pickInvalid = await processAgentMessage({
+    conversationHistory: numberedHist,
+    businessName: "XStream-Store-Pk",
+    agentName: "Order Desk",
+    products: nineCatalog,
+    pendingOrder: null,
+    customerName: "Baloch",
+    groqApiKey: "skip",
+    message: "99",
+  });
+  const photoSix = await processAgentMessage({
+    conversationHistory: numberedHist,
+    businessName: "XStream-Store-Pk",
+    agentName: "Order Desk",
+    products: nineCatalog,
+    pendingOrder: null,
+    customerName: "Baloch",
+    groqApiKey: "skip",
+    message: "6 ki photo bhejo",
+  });
   const checks = [
     ["yes confirms", yes.should_create_order === true && yes.intent === "confirm_order"],
     ["yes keeps name", yes.parsed_order?.customer_name === "Mohsin Abid"],
@@ -143,6 +190,12 @@ async function run() {
     ["catalog pick asks qty", /quantity kitni chahiye|how many pieces/i.test(pickNine.reply)],
     ["catalog pick ignores old name", pickNine.parsed_order?.customer_name !== "Baloch"],
     ["catalog pick ignores old address", !/ghazi ghat/i.test(String(pickNine.parsed_order?.address || ""))],
+    ["identity keeps draft name", identityAsk.parsed_order?.customer_name === "Baloch"],
+    ["identity does not ask payment", /whatsapp assistant/i.test(identityAsk.reply) && !/payment method|easypaisa/i.test(identityAsk.reply)],
+    ["catalog 9 is item 9 not 6", pickRealNine.parsed_order?.products?.[0]?.name === "Item Nine"],
+    ["invalid catalog 99", /current catalog/i.test(pickInvalid.reply) && !pickInvalid.should_create_order],
+    ["photo number does not checkout", photoSix.intent === "product_inquiry" && !photoSix.should_create_order && !/quantity kitni|how many pieces/i.test(photoSix.reply)],
+    ["photo number no old name", photoSix.parsed_order?.customer_name !== "Baloch"],
   ] as Array<[string, boolean]>;
   for (const [label, ok] of checks) {
     console.log(ok ? "PASS" : "FAIL", label);
@@ -153,6 +206,10 @@ async function run() {
       console.log("  love:", love.reply.slice(0, 180), love.parsed_order);
       console.log("  store:", storeMidOrder.reply.slice(0, 180));
       console.log("  pick:", pickNine.reply.slice(0, 220), pickNine.parsed_order);
+      console.log("  identity:", identityAsk.reply.slice(0, 180), identityAsk.parsed_order?.customer_name);
+      console.log("  nine:", pickRealNine.reply.slice(0, 180), pickRealNine.parsed_order?.products);
+      console.log("  invalid:", pickInvalid.reply.slice(0, 180));
+      console.log("  photo:", photoSix.intent, photoSix.reply.slice(0, 180), photoSix.parsed_order?.customer_name);
     }
   }
   if (checks.some(([, ok]) => !ok)) process.exit(1);
