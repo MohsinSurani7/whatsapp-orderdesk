@@ -93,8 +93,10 @@ export interface LocalOrderItem {
   order_id: string;
   product_id: string | null;
   product_name: string;
+  sku?: string | null;
   quantity: number;
   unit_price: number;
+  subtotal?: number | null;
   variant: string | null;
 }
 
@@ -107,6 +109,7 @@ export interface LocalConversation {
   status: string;
   pending_order_data: Record<string, unknown> | null;
   agent_paused?: boolean;
+  last_order_idempotency?: string | null;
   last_message_at: string;
   created_at: string;
 }
@@ -166,6 +169,31 @@ export interface LocalNotification {
   created_at: string;
 }
 
+export interface LocalInventoryTransaction {
+  id: string;
+  business_id: string;
+  product_id: string;
+  variant_id: string | null;
+  type: string;
+  quantity: number;
+  reference_type: string | null;
+  reference_id: string | null;
+  previous_stock: number | null;
+  new_stock: number | null;
+  actor_type?: string | null;
+  actor_id?: string | null;
+  reason?: string | null;
+  created_at: string;
+}
+
+export interface LocalIdempotencyKey {
+  id: string;
+  business_id: string;
+  key: string;
+  order_id: string | null;
+  created_at: string;
+}
+
 export interface DatabaseShape {
   users: LocalUser[];
   businesses: LocalBusiness[];
@@ -180,6 +208,8 @@ export interface DatabaseShape {
   templates: LocalTemplate[];
   subscriptions: LocalSubscription[];
   notifications: LocalNotification[];
+  inventory_transactions?: LocalInventoryTransaction[];
+  idempotency_keys?: LocalIdempotencyKey[];
 }
 
 const emptyDb = (): DatabaseShape => ({
@@ -196,6 +226,8 @@ const emptyDb = (): DatabaseShape => ({
   templates: [],
   subscriptions: [],
   notifications: [],
+  inventory_transactions: [],
+  idempotency_keys: [],
 });
 
 function dbPath() {
@@ -223,6 +255,28 @@ export async function writeDb(db: DatabaseShape) {
   const file = dbPath();
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, JSON.stringify(db, null, 2), "utf8");
+}
+
+let dbLock: Promise<unknown> = Promise.resolve();
+
+export async function withDbLock<T>(fn: (db: DatabaseShape) => Promise<T> | T): Promise<T> {
+  const prev = dbLock;
+  let release!: () => void;
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  dbLock = prev.then(() => gate).catch(() => undefined);
+  await prev;
+  try {
+    const db = await readDb();
+    if (!db.inventory_transactions) db.inventory_transactions = [];
+    if (!db.idempotency_keys) db.idempotency_keys = [];
+    const result = await fn(db);
+    await writeDb(db);
+    return result;
+  } finally {
+    release();
+  }
 }
 
 export function hashPassword(password: string) {

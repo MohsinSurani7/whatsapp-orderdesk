@@ -304,7 +304,11 @@ export default function ProductsPage() {
               <p className="text-lg font-bold text-green-600">{formatCurrency(Number(p.price))}</p>
               {p.sizes && <p className="mt-1 text-xs text-gray-500">Sizes: {p.sizes}</p>}
               {p.description && <p className="mt-1 text-xs text-gray-500">{p.description}</p>}
-              {p.stock != null && <p className="text-xs text-gray-500">Stock: {p.stock}</p>}
+              {p.stock != null && (
+                <p className={`text-xs ${p.stock <= 0 ? "font-medium text-red-600" : p.stock <= 5 ? "font-medium text-amber-600" : "text-gray-500"}`}>
+                  {p.stock <= 0 ? "Out of stock" : p.stock <= 5 ? `Low stock: ${p.stock}` : `Stock: ${p.stock}`}
+                </p>
+              )}
               <div className="mt-3 flex gap-2">
                 <Button type="button" variant="outline" size="sm" onClick={() => startEdit(p)}>
                   <Pencil size={14} /> Edit

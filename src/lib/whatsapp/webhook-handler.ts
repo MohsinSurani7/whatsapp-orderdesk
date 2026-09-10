@@ -1,5 +1,8 @@
 import { processAgentMessage } from "@/lib/ai/agent";
 import { transcribeWhatsAppAudio } from "@/lib/ai/transcribe";
+import { isRateLimited, withConversationLock } from "@/lib/commerce/locks";
+import { createWhatsAppOrder } from "@/lib/commerce/orders";
+import { normalizePhone } from "@/lib/commerce/phone";
 import {
   sendWhatsAppText,
   sendWhatsAppImage,
@@ -17,9 +20,8 @@ import {
   resolveWhatsAppConfig,
   uid,
   writeDb,
-  type LocalConversation,
 } from "@/lib/db/store";
-import type { AgentResponse, ParsedOrderData } from "@/types/database";
+import type { AgentResponse } from "@/types/database";
 
 const inflightInbound = new Set<string>();
 
@@ -75,6 +77,10 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
         if (inflightInbound.has(msg.id)) continue;
         inflightInbound.add(msg.id);
         try {
+        if (isRateLimited(`wa:${metadata.phone_number_id}:${msg.from}`)) {
+          console.error("WhatsApp inbound rate limited", msg.from);
+          continue;
+        }
         const inbound = await resolveInboundText(
           msg,
           auth.accessToken,
@@ -93,18 +99,22 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
         if (db.messages.some((m) => m.whatsapp_message_id === msg.id)) continue;
 
         const customerPhone = msg.from;
+        const customerPhoneNorm = normalizePhone(customerPhone) || customerPhone;
         const customerWaName = contacts?.[0]?.profile?.name ?? null;
         let customer = db.customers.find(
           (c) =>
             c.business_id === business.id &&
-            (c.phone === customerPhone || c.whatsapp_id === customerPhone)
+            (c.phone === customerPhone ||
+              c.whatsapp_id === customerPhone ||
+              normalizePhone(c.phone) === customerPhoneNorm ||
+              normalizePhone(c.whatsapp_id || "") === customerPhoneNorm)
         );
         if (!customer) {
           customer = {
             id: uid(),
             business_id: business.id,
             name: customerWaName || "WhatsApp Customer",
-            phone: customerPhone,
+            phone: customerPhoneNorm,
             email: null,
             address: null,
             notes: null,
@@ -140,6 +150,7 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
           if (customerWaName) conversation.customer_name = customerWaName;
           if (!agentOn) conversation.status = "handed_off";
         }
+        if (!conversation) continue;
 
         const inboundText = textBody || (msg.context?.id ? "ye product chahiye" : "[message]");
         const voiceOk =
@@ -171,9 +182,15 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
         conversation.last_message_at = nowIso();
         await writeDb(db);
 
-        const chatAgentOn = agentOn && conversation.agent_paused !== true;
+        await withConversationLock(conversation.id, async () => {
+        const latestAfterLock = await readDb();
+        const locked =
+          latestAfterLock.conversations.find((c) => c.id === conversation.id) || conversation;
+        if (!locked) return;
+
+        const chatAgentOn = agentOn && locked.agent_paused !== true;
         if (!chatAgentOn) {
-          continue;
+          return;
         }
 
         if (!accessToken || !phoneNumberId) {
@@ -181,18 +198,18 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
             business.id,
             `Token missing — ${customerPhone} ka message save ho gaya. Dashboard → WhatsApp pe token save karke Chats se reply karein.`
           );
-          continue;
+          return;
         }
 
-        const history = db.messages
-          .filter((m) => m.conversation_id === conversation!.id)
+        const history = latestAfterLock.messages
+          .filter((m) => m.conversation_id === locked.id)
           .slice(-40)
           .map((m) => ({
             role: (m.direction === "inbound" ? "user" : "assistant") as "user" | "assistant",
             content: m.content.replace(/^🎤\s*/, ""),
           }));
 
-        const products = db.products
+        const products = latestAfterLock.products
           .filter((p) => p.business_id === business.id && p.is_active)
           .map((p) => ({
             id: p.id,
@@ -202,19 +219,26 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
             image_url: p.image_url,
             category: p.category,
             sizes: p.sizes,
+            stock: p.stock ?? null,
+            sku: p.sku ?? null,
           }));
 
         const referredProduct = await resolveReferredProduct({
-          conversationId: conversation.id,
+          conversationId: locked.id,
           contextId: msg.context?.id,
           text: inboundText,
           products,
         });
 
-        const bizOrders = db.orders.filter((o) => o.business_id === business.id);
+        const bizOrders = latestAfterLock.orders.filter((o) => o.business_id === business.id);
         const customerOrders = bizOrders.filter((o) => {
-          const c = db.customers.find((cu) => cu.id === o.customer_id);
-          return c?.phone === customerPhone || c?.whatsapp_id === customerPhone || o.whatsapp_conversation_id === conversation.id;
+          const c = latestAfterLock.customers.find((cu) => cu.id === o.customer_id);
+          return (
+            c?.id === locked.customer_id ||
+            c?.phone === customerPhone ||
+            c?.whatsapp_id === customerPhone ||
+            o.whatsapp_conversation_id === locked.id
+          );
         });
 
         let agentResponse: AgentResponse;
@@ -225,8 +249,8 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
           businessName: business.name,
           agentName: config.agent_name,
           products,
-          pendingOrder: conversation.pending_order_data,
-          customerName: conversation.customer_name,
+          pendingOrder: locked.pending_order_data,
+          customerName: locked.customer_name,
           instructions: config.agent_instructions || config.agent_greeting,
           referredProduct,
           groqApiKey: config.groq_api_key,
@@ -239,6 +263,16 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
             delivered: bizOrders.filter((o) => o.order_status === "delivered").length,
             pending: bizOrders.filter((o) => o.order_status === "pending" || o.order_status === "processing").length,
             customerTotal: customerOrders.length,
+            recentOrders: customerOrders
+              .filter((o) => o.order_status !== "cancelled")
+              .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
+              .slice(0, 8)
+              .map((o) => ({
+                order_number: o.order_number,
+                status: o.order_status,
+                total: o.total,
+                created_at: o.created_at,
+              })),
           },
         });
         if (!agentResponse?.reply?.trim()) {
@@ -250,7 +284,7 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
             intent: "general",
             reply:
               "Maaf kijiye, reply ruk gaya tha. Aap ka last message save hai — ek line mein dobara likh dein, main continue karta hoon.",
-            parsed_order: conversation.pending_order_data as AgentResponse["parsed_order"],
+            parsed_order: locked.pending_order_data as AgentResponse["parsed_order"],
             should_create_order: false,
             order_id: null,
             confidence: 0.2,
@@ -260,41 +294,50 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
         }
 
         let orderId: string | null = null;
+        let createdSummary: string | null = null;
         if (agentResponse.should_create_order && agentResponse.parsed_order) {
-          orderId = await createOrderFromAgent(conversation, agentResponse.parsed_order, customerPhone, business.id);
+          const created = await createWhatsAppOrder({
+            conversationId: locked.id,
+            businessId: business.id,
+            customerPhone,
+            orderData: agentResponse.parsed_order,
+            shopNotes: config.agent_instructions,
+            businessName: business.name,
+          });
+          if (created.success) {
+            orderId = created.orderId;
+            agentResponse.order_id = created.orderId;
+            createdSummary = `✅ Order confirm ho gaya.\n\nOrder #${created.orderNumber}\nTotal: Rs.${created.total}\nPayment: ${created.paymentMethod}\n\nAap ka order processing ke liye save ho gaya hai.`;
+          } else {
+            agentResponse.should_create_order = false;
+            agentResponse.reply = created.message;
+          }
         } else if (agentResponse.parsed_order) {
           const latest = await readDb();
-          const conv = latest.conversations.find((c) => c.id === conversation!.id);
-          if (conv) {
+          const live = latest.conversations.find((c) => c.id === locked.id);
+          if (live) {
             const po = agentResponse.parsed_order;
             const empty = !po.products?.length && !po.customer_name && !po.address && !po.payment_method;
-            conv.pending_order_data = empty ? null : (po as unknown as Record<string, unknown>);
-            conv.status = agentResponse.needs_human ? "handed_off" : empty ? "active" : "awaiting_confirmation";
-            conv.last_message_at = nowIso();
+            live.pending_order_data = empty ? null : (po as unknown as Record<string, unknown>);
+            live.status = agentResponse.needs_human ? "handed_off" : empty ? "active" : "awaiting_confirmation";
+            live.last_message_at = nowIso();
             await writeDb(latest);
           }
         } else if (agentResponse.needs_human) {
           const latest = await readDb();
-          const conv = latest.conversations.find((c) => c.id === conversation!.id);
-          if (conv) {
-            conv.status = "handed_off";
-            conv.last_message_at = nowIso();
+          const live = latest.conversations.find((c) => c.id === locked.id);
+          if (live) {
+            live.status = "handed_off";
+            live.last_message_at = nowIso();
             await writeDb(latest);
           }
         }
 
         if (agentResponse.needs_human) {
-          await recordAttention(business.id, conversation.id, customerPhone, inboundText);
+          await recordAttention(business.id, locked.id, customerPhone, inboundText);
         }
 
-        let replyText = agentResponse.reply;
-        if (orderId) {
-          const latest = await readDb();
-          const order = latest.orders.find((o) => o.id === orderId);
-          if (order) {
-            replyText += `\n\nOrder #${order.order_number} create ho gaya. Total: Rs.${order.total}`;
-          }
-        }
+        let replyText = createdSummary || agentResponse.reply;
 
         if (accessToken && phoneNumberId && replyText.trim()) {
           await markMessageAsRead(phoneNumberId, accessToken, msg.id, true).catch(() => {});
@@ -304,7 +347,7 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
               accessToken,
               customerPhone,
               businessId: business.id,
-              conversationId: conversation.id,
+              conversationId: locked.id,
               replyText,
               agentResponse,
             });
@@ -313,10 +356,10 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
             await recordWhatsAppError(business.id, String(error));
             if (orderId && agentResponse.parsed_order) {
               const latest = await readDb();
-              const conv = latest.conversations.find((c) => c.id === conversation!.id);
-              if (conv) {
-                conv.pending_order_data = agentResponse.parsed_order as unknown as Record<string, unknown>;
-                conv.status = "awaiting_confirmation";
+              const live = latest.conversations.find((c) => c.id === locked.id);
+              if (live) {
+                live.pending_order_data = agentResponse.parsed_order as unknown as Record<string, unknown>;
+                live.status = "awaiting_confirmation";
                 await writeDb(latest);
               }
             }
@@ -332,6 +375,7 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
             }
           }
         }
+        });
         } finally {
           setTimeout(() => inflightInbound.delete(msg.id), 90_000);
         }
@@ -633,103 +677,6 @@ async function resolveReferredProduct(params: {
         (m.message_type === "image" || Boolean(m.product_name) || /Rs\.\d+/.test(m.content))
     );
   return lastCatalog ? productFromStoredMessage(lastCatalog, params.products) : null;
-}
-
-async function createOrderFromAgent(
-  conversation: LocalConversation,
-  orderData: ParsedOrderData,
-  customerPhone: string,
-  businessId: string
-): Promise<string | null> {
-  const db = await readDb();
-  let customer = conversation.customer_id
-    ? db.customers.find((c) => c.id === conversation.customer_id)
-    : db.customers.find((c) => c.business_id === businessId && c.phone === (orderData.phone || customerPhone));
-
-  if (!customer) {
-    customer = {
-      id: uid(),
-      business_id: businessId,
-      name: orderData.customer_name || conversation.customer_name || "WhatsApp Customer",
-      phone: orderData.phone || customerPhone,
-      email: null,
-      address: orderData.address,
-      notes: orderData.notes && !["naam", "address", "payment"].includes(String(orderData.notes)) ? orderData.notes : null,
-      whatsapp_id: customerPhone,
-      total_orders: 0,
-      total_spent: 0,
-      created_at: nowIso(),
-    };
-    db.customers.push(customer);
-  } else {
-    if (orderData.customer_name) customer.name = orderData.customer_name;
-    customer.phone = orderData.phone || customerPhone || customer.phone;
-    if (orderData.address) customer.address = orderData.address;
-    customer.whatsapp_id = customerPhone;
-  }
-
-  const conv = db.conversations.find((c) => c.id === conversation.id);
-  if (conv) conv.customer_id = customer.id;
-
-  const count = db.orders.filter((o) => o.business_id === businessId).length;
-  const orderNumber = `ORD-${String(count + 1).padStart(5, "0")}`;
-  const subtotal =
-    orderData.subtotal ??
-    orderData.products.reduce((sum, p) => sum + (p.unit_price ?? 0) * p.quantity, 0);
-  const total = orderData.total ?? subtotal + (orderData.delivery_fee ?? 0) - (orderData.discount ?? 0);
-
-  const orderId = uid();
-  db.orders.push({
-    id: orderId,
-    business_id: businessId,
-    order_number: orderNumber,
-    customer_id: customer.id,
-    subtotal,
-    discount: orderData.discount ?? 0,
-    delivery_fee: orderData.delivery_fee ?? 0,
-    tax: 0,
-    total,
-    payment_method: orderData.payment_method ?? "cod",
-    payment_status: orderData.payment_status ?? "unpaid",
-    order_status: "pending",
-    delivery_address: orderData.address || customer.address,
-    customer_note: orderData.notes && !["naam", "address", "payment"].includes(String(orderData.notes)) ? orderData.notes : null,
-    internal_note: null,
-    source: "whatsapp",
-    whatsapp_conversation_id: conversation.id,
-    created_at: nowIso(),
-    updated_at: nowIso(),
-  });
-
-  for (const p of orderData.products) {
-    db.order_items.push({
-      id: uid(),
-      order_id: orderId,
-      product_id: null,
-      product_name: p.name,
-      quantity: p.quantity,
-      unit_price: p.unit_price ?? 0,
-      variant: p.variant,
-    });
-  }
-
-  customer.total_orders += 1;
-  customer.total_spent += total;
-  if (conv) {
-    conv.pending_order_data = null;
-    conv.status = "active";
-  }
-  db.notifications.push({
-    id: uid(),
-    business_id: businessId,
-    title: "New WhatsApp Order",
-    message: `Order ${orderNumber} received via WhatsApp AI agent.`,
-    type: "order",
-    read: false,
-    created_at: nowIso(),
-  });
-  await writeDb(db);
-  return orderId;
 }
 
 async function recordAttention(businessId: string, conversationId: string, phone: string, preview: string) {

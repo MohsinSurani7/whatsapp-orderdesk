@@ -10,7 +10,8 @@ import {
   uniqueCategories,
   type ShopProduct,
 } from "@/lib/catalog";
-import { ORDER_DESK_SHOTS, buildOrderDeskSystem } from "@/lib/ai/order-desk-prompt";
+import { ORDER_DESK_SHOTS, XSTREAM_STORE_FACTS, buildOrderDeskSystem } from "@/lib/ai/order-desk-prompt";
+import { addCartLine, formatCartLines, removeCartLine, setCartLineQty, type CartLine } from "@/lib/commerce/cart";
 
 type CatalogProduct = ShopProduct;
 
@@ -19,6 +20,7 @@ type OrderStats = {
   delivered: number;
   pending: number;
   customerTotal: number;
+  recentOrders?: Array<{ order_number: string; status: string; total: number; created_at: string }>;
 };
 
 type AgentParams = {
@@ -634,34 +636,61 @@ function isBogusName(name?: string | null) {
   );
 }
 
+function stockShortage(
+  product: CatalogProduct | undefined,
+  qty: number
+): { left: number; over: boolean } | null {
+  if (product?.stock == null || Number.isNaN(Number(product.stock))) return null;
+  const left = Math.max(0, Number(product.stock));
+  return { left, over: qty > left };
+}
+
 function lockProductForCheckout(params: AgentParams, product: CatalogProduct, qty: number): AgentResponse {
   const en = inferCustomerLanguage(params.message, params.conversationHistory) === "English";
+  const want = Math.max(1, qty);
+  const shortage = stockShortage(product, want);
+  if (shortage && shortage.left <= 0) {
+    return {
+      intent: "product_inquiry",
+      reply: en
+        ? `${product.name} is out of stock right now. I can show similar items from the catalog if you want.`
+        : `${product.name} filhal out of stock hai. Similar listed items dikha sakta hoon — boliye.`,
+      parsed_order: params.pendingOrder ? mergeOrder(params.pendingOrder, null, params.products) : null,
+      should_create_order: false,
+      order_id: null,
+      confidence: 1,
+      needs_human: false,
+      skip_media: true,
+    };
+  }
+  if (shortage?.over) {
+    return {
+      intent: "place_order",
+      reply: en
+        ? `Only ${shortage.left} piece(s) of ${product.name} are available. Should I lock ${shortage.left}?`
+        : `${product.name} ke sirf ${shortage.left} pieces available hain. ${shortage.left} ka order karna chahenge?`,
+      parsed_order: params.pendingOrder ? mergeOrder(params.pendingOrder, null, params.products) : null,
+      should_create_order: false,
+      order_id: null,
+      confidence: 1,
+      needs_human: false,
+      skip_media: true,
+    };
+  }
   const prev = mergeOrder(params.pendingOrder, null, params.products);
-  const pending = mergeOrder(
+  const lines = addCartLine(prev.products as CartLine[], {
+    product_id: product.id || null,
+    sku: product.sku || null,
+    name: product.name,
+    quantity: Math.max(1, qty),
+    variant: null,
+    unit_price: product.price,
+  });
+  const pending = matchCatalog(
     {
       ...prev,
       customer_name: isBogusName(prev.customer_name) ? null : prev.customer_name,
-      products: [],
-    },
-    {
-      customer_name: null,
-      phone: null,
-      address: null,
-      products: [
-        {
-          name: product.name,
-          quantity: Math.max(1, qty),
-          variant: null,
-          unit_price: product.price,
-        },
-      ],
-      subtotal: null,
-      delivery_fee: null,
-      discount: null,
-      total: null,
-      payment_method: null,
-      payment_status: null,
-      notes: null,
+      products: lines,
     },
     params.products
   );
@@ -670,14 +699,16 @@ function lockProductForCheckout(params: AgentParams, product: CatalogProduct, qt
     customer_name: isBogusName(pending.customer_name) ? null : pending.customer_name,
   });
   const missing = nextMissingField(clean, params.products);
+  const line = clean.products.find((p) => p.name.toLowerCase() === product.name.toLowerCase()) || clean.products[0];
   return {
     intent: "place_order",
+    action: "add_to_cart",
     reply: en
-      ? `Got it — ${clean.products[0].quantity}x ${product.name} (Rs.${product.price}).${
-          missing ? ` Please share your ${missing.prompt}.` : ' Reply "yes" to confirm.'
+      ? `Got it — ${line.quantity}x ${product.name} (Rs.${product.price}). Cart:\n${formatCartLines(clean.products)}${
+          missing ? `\nPlease share your ${missing.prompt}.` : '\nReply "yes" to confirm.'
         }`
-      : `Theek hai — ${clean.products[0].quantity}x ${product.name} (Rs.${product.price}).${
-          missing ? ` Baraye meherbani apna ${missing.prompt} bhej dein.` : ' Confirm ke liye "yes" likhein.'
+      : `Theek hai — ${line.quantity}x ${product.name} (Rs.${product.price}). Cart:\n${formatCartLines(clean.products)}${
+          missing ? `\nBaraye meherbani apna ${missing.prompt} bhej dein.` : '\nConfirm ke liye "yes" likhein.'
         }`,
     parsed_order: missing ? { ...clean, notes: missing.key } : clean,
     should_create_order: false,
@@ -989,13 +1020,29 @@ function continueLockedOrder(
 
   pending = hydratePending(params, pending);
   const en = inferCustomerLanguage(params.message, params.conversationHistory) === "English";
+  const cartEdit = applyCartEdit(params.message, pending, params.products);
+  if (cartEdit) {
+    pending = hydratePending(params, { ...pending, products: cartEdit.products });
+    const missingCart = nextMissingField(pending, params.products);
+    return {
+      intent: "place_order",
+      action: cartEdit.action,
+      reply: en ? cartEdit.replyEn : cartEdit.replyUr,
+      parsed_order: missingCart ? { ...pending, notes: missingCart.key } : pending,
+      should_create_order: false,
+      order_id: null,
+      confidence: 1,
+      needs_human: false,
+      skip_media: true,
+    };
+  }
   if (String(pending.notes || "") === "revise") {
     if (isConfirmYes(params.message) && orderLooksComplete(pending, params.products)) {
       return {
         intent: "confirm_order",
         reply: en
-          ? "Thank you — order confirmed. We'll process it shortly."
-          : "Shukriya! Order confirm ho gaya. Hum jald process karenge.",
+          ? "Thank you — confirming now. You'll get the order number once it's saved."
+          : "Shukriya — order save kar raha hoon. Number save hone ke baad aayega.",
         parsed_order: { ...pending, notes: null },
         should_create_order: true,
         order_id: null,
@@ -1102,11 +1149,50 @@ function continueLockedOrder(
   }
 
   if (confirming && complete && !isSoftNo(params.message)) {
+    const issues = pending.products
+      .map((item) => {
+        const catalogHit = (params.products || []).find(
+          (p) =>
+            (item.product_id && p.id === item.product_id) ||
+            p.name.toLowerCase() === String(item.name || "").toLowerCase()
+        );
+        const shortage = stockShortage(catalogHit, item.quantity || 1);
+        return { item, catalogHit, shortage };
+      })
+      .filter((r) => r.shortage && (r.shortage.left <= 0 || r.shortage.over));
+    if (issues.length) {
+      const lines = issues
+        .map((r) =>
+          r.shortage && r.shortage.left <= 0
+            ? `${r.item.name} out of stock`
+            : `${r.item.name}: ${r.shortage?.left ?? 0} available (requested ${r.item.quantity})`
+        )
+        .join("\n");
+      const okItems = pending.products.filter((p) => !issues.some((i) => i.item.name === p.name));
+      const partial = okItems.length
+        ? en
+          ? `\nOther items are still available:\n${formatCartLines(okItems)}\nRemove the unavailable item(s) then confirm.`
+          : `\nBaaki items available hain:\n${formatCartLines(okItems)}\nUnavailable hata ke phir confirm karein.`
+        : "";
+      return {
+        intent: "place_order",
+        reply: en
+          ? `Cannot confirm yet:\n${lines}${partial}`
+          : `Order confirm nahi ho sakta:\n${lines}${partial}`,
+        parsed_order: pending,
+        should_create_order: false,
+        order_id: null,
+        confidence: 1,
+        needs_human: false,
+        skip_media: true,
+      };
+    }
     return {
       intent: "confirm_order",
+      action: "create_order",
       reply: en
-        ? "Thank you — order confirmed. We'll process it shortly."
-        : "Shukriya! Order confirm ho gaya. Hum jald process karenge.",
+        ? "Thank you — confirming now. You'll get the order number once it's saved."
+        : "Shukriya — order save kar raha hoon. Number save hone ke baad aayega.",
       parsed_order: { ...pending, notes: null },
       should_create_order: true,
       order_id: null,
@@ -1324,6 +1410,7 @@ async function llmAgent(client: OpenAI, models: string[], params: AgentParams): 
     sizes: parseSizeOptions(p.sizes),
     description_short: (p.description || "").slice(0, 120),
     has_photo: Boolean(p.image_url),
+    stock: p.stock == null ? null : Number(p.stock),
   }));
   const stats = params.orderStats;
   const wallets = [
@@ -1347,7 +1434,7 @@ async function llmAgent(client: OpenAI, models: string[], params: AgentParams): 
   });
 
   const user = `DASHBOARD_PRODUCTS: ${JSON.stringify(catalogJson)}
-SHOP_NOTES: ${params.instructions || "(none)"}
+SHOP_NOTES: ${[XSTREAM_STORE_FACTS, params.instructions].filter(Boolean).join("\n")}
 WALLET_NUMBERS: ${wallets || "(not set)"}
 CUSTOMER_WHATSAPP_NAME: ${params.customerName || "(unknown)"}
 PENDING_ORDER: ${JSON.stringify(params.pendingOrder || null)}
@@ -1556,6 +1643,7 @@ function localAgent(params: {
   products?: CatalogProduct[];
   customerName?: string | null;
   businessName: string;
+  agentName?: string;
   instructions?: string | null;
   referredProduct?: CatalogProduct | null;
   orderStats?: OrderStats;
@@ -1581,7 +1669,7 @@ function localAgent(params: {
 
   if (isChitChatNotOrder(text)) {
     const shop = params.businessName;
-    const agent = params.agentName;
+    const agent = params.agentName || "Order Assistant";
     const cancelled = checkoutWasCancelled(params.conversationHistory);
     let reply: string;
     if (/shop (ka )?name|store (ka )?name|business (ka )?name|dukaan (ka )?name/.test(lower)) {
@@ -1731,6 +1819,51 @@ function localAgent(params: {
         };
       }
     }
+  }
+
+  if (isOrderTrackQuery(lower)) {
+    const mine = (params.orderStats?.recentOrders || []).filter((o) =>
+      ["pending", "confirmed", "processing", "preparing", "ready", "out_for_delivery"].includes(o.status)
+    );
+    if (!mine.length) {
+      return {
+        intent: "order_status",
+        action: "get_order_status",
+        reply: en
+          ? "I don't see an active order on this WhatsApp number yet."
+          : "Is WhatsApp number pe koi active order nahi mil raha.",
+        parsed_order: previous.products.length ? previous : null,
+        confidence: 0.95,
+        ...empty,
+        skip_media: true,
+      };
+    }
+    if (mine.length === 1) {
+      const o = mine[0];
+      return {
+        intent: "order_status",
+        action: "get_order_status",
+        reply: en
+          ? `Your order #${o.order_number} is ${o.status}. Total Rs.${o.total}.`
+          : `Aap ka order #${o.order_number} abhi ${o.status} hai. Total Rs.${o.total}.`,
+        parsed_order: previous.products.length ? previous : null,
+        confidence: 0.95,
+        ...empty,
+        skip_media: true,
+      };
+    }
+    const list = mine.map((o) => `#${o.order_number} — Rs.${o.total} — ${o.status}`).join("\n");
+    return {
+      intent: "order_status",
+      action: "get_order_status",
+      reply: en
+        ? `You have ${mine.length} active orders:\n${list}\nWhich order number should I check?`
+        : `Aap ke ${mine.length} active orders hain:\n${list}\nKis order ka status chahiye? Order number likhein.`,
+      parsed_order: previous.products.length ? previous : null,
+      confidence: 0.95,
+      ...empty,
+      skip_media: true,
+    };
   }
 
   if (isStatsQuery(lower)) {
@@ -1980,6 +2113,10 @@ function isBuyIntent(lower: string) {
     /\d+\s*(?:x|×|piece|pcs)\b/.test(lower) ||
     /quantity\s*\d+/.test(lower)
   );
+}
+
+function isOrderTrackQuery(lower: string) {
+  return /mera order|meri order|order kahan|kahan pohanch|track order|order status|order kaha/.test(lower);
 }
 
 function isStatsQuery(lower: string) {
@@ -2300,15 +2437,27 @@ function mergeOrder(
   };
   if (!extracted) return matchCatalog(base, products);
   const mergedProducts = extracted.products.length
-    ? extracted.products.map((item) => {
-        const prev = base.products.find((p) => p.name.toLowerCase() === item.name.toLowerCase());
-        return {
-          ...item,
-          quantity: item.quantity || prev?.quantity || 1,
-          variant: item.variant || prev?.variant || null,
-          unit_price: item.unit_price ?? prev?.unit_price ?? null,
-        };
-      })
+    ? extracted.products.reduce((acc, item) => {
+        const idx = acc.findIndex(
+          (p) =>
+            p.name.toLowerCase() === item.name.toLowerCase() &&
+            (!item.variant || !p.variant || (p.variant || "") === (item.variant || ""))
+        );
+        if (idx >= 0) {
+          const next = [...acc];
+          next[idx] = {
+            ...next[idx],
+            ...item,
+            quantity: item.quantity || next[idx].quantity || 1,
+            variant: item.variant || next[idx].variant || null,
+            unit_price: item.unit_price ?? next[idx].unit_price ?? null,
+            product_id: item.product_id ?? next[idx].product_id ?? null,
+            sku: item.sku ?? next[idx].sku ?? null,
+          };
+          return next;
+        }
+        return [...acc, item];
+      }, [...base.products])
     : base.products.map((item) => {
         const extra = extracted.products.find((p) => p.name.toLowerCase() === item.name.toLowerCase());
         return extra ? { ...item, variant: extra.variant || item.variant } : item;
@@ -2340,6 +2489,59 @@ function mergeOrder(
   );
 }
 
+function applyCartEdit(
+  message: string,
+  pending: ParsedOrderData,
+  catalog?: CatalogProduct[]
+): {
+  products: ParsedOrderData["products"];
+  action: "view_cart" | "remove_from_cart" | "update_cart_item" | "clear_cart";
+  replyEn: string;
+  replyUr: string;
+} | null {
+  const t = message.toLowerCase().trim();
+  if (!pending.products.length && !/cart dikhao|view cart|cart dikha/.test(t)) return null;
+  if (isConfirmYes(message) || isCancelRequest(message)) return null;
+  if (/cart dikhao|view cart|cart dikha|cart batao/.test(t)) {
+    const list = formatCartLines(pending.products);
+    return {
+      products: pending.products,
+      action: "view_cart",
+      replyEn: `Your cart:\n${list || "empty"}`,
+      replyUr: `Aap ka cart:\n${list || "khali"}`,
+    };
+  }
+  if (/clear cart|cart khali|sab hata do|sari items hata/.test(t)) {
+    return {
+      products: [],
+      action: "clear_cart",
+      replyEn: "Cart cleared. Send a product name to start again.",
+      replyUr: "Cart khali kar diya. Naya product naam likhein.",
+    };
+  }
+  const named = findProductInText(t, catalog);
+  if (named && /hata do|hata den|remove|nikal do|delete/.test(t)) {
+    const next = removeCartLine(pending.products as CartLine[], { name: named.name });
+    return {
+      products: next,
+      action: "remove_from_cart",
+      replyEn: `${named.name} removed.\n${formatCartLines(next) || "Cart empty."}`,
+      replyUr: `${named.name} hata diya.\n${formatCartLines(next) || "Cart khali hai."}`,
+    };
+  }
+  const qty = extractQuantity(t);
+  if (named && qty && /kar do|kar den|update|quantity|qty/.test(t)) {
+    const next = setCartLineQty(pending.products as CartLine[], { name: named.name }, qty);
+    return {
+      products: next,
+      action: "update_cart_item",
+      replyEn: `Updated ${named.name} to ${qty}.\n${formatCartLines(next)}`,
+      replyUr: `${named.name} quantity ${qty} kar di.\n${formatCartLines(next)}`,
+    };
+  }
+  return null;
+}
+
 function extraVariantFromExtracted(_extracted: ParsedOrderData): string | null {
   return null;
 }
@@ -2352,7 +2554,13 @@ function matchCatalog(order: ParsedOrderData, products?: CatalogProduct[]): Pars
         p.name.toLowerCase().includes(item.name.toLowerCase())
     );
     if (!hit) return item;
-    return { ...item, name: hit.name, unit_price: hit.price };
+    return {
+      ...item,
+      name: hit.name,
+      unit_price: hit.price,
+      product_id: hit.id || item.product_id || null,
+      sku: hit.sku || item.sku || null,
+    };
   });
   const subtotal = mapped.reduce((s, p) => s + (p.unit_price ?? 0) * p.quantity, 0);
   const total = subtotal + (order.delivery_fee ?? 0) - (order.discount ?? 0);

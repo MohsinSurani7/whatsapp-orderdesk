@@ -122,6 +122,7 @@ export default async function OrderDetailPage({ params }: { params: Promise<{ id
                   <span>
                     {item.quantity}x {item.product_name}
                     {item.variant ? ` (${item.variant})` : ""}
+                    {item.sku ? ` · SKU ${item.sku}` : ""}
                   </span>
                   <span>{formatCurrency(Number(item.unit_price) * item.quantity, business.currency)}</span>
                 </div>

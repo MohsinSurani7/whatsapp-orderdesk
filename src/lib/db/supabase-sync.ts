@@ -48,6 +48,8 @@ export async function loadDbFromSupabase(): Promise<DatabaseShape> {
     templates,
     subscriptions,
     notifications,
+    inventoryTx,
+    idemKeys,
   ] = await Promise.all([
     sb.from("profiles").select("*"),
     sb.from("businesses").select("*"),
@@ -62,6 +64,8 @@ export async function loadDbFromSupabase(): Promise<DatabaseShape> {
     sb.from("whatsapp_templates").select("*"),
     sb.from("subscriptions").select("*"),
     sb.from("notifications").select("*"),
+    sb.from("inventory_transactions").select("*"),
+    sb.from("idempotency_keys").select("*"),
   ]);
 
   const firstError = [
@@ -78,7 +82,9 @@ export async function loadDbFromSupabase(): Promise<DatabaseShape> {
     templates,
     subscriptions,
     notifications,
-  ].find((r) => r.error);
+    inventoryTx,
+    idemKeys,
+  ].find((r) => r.error && !/schema cache|does not exist|Could not find the table/i.test(r.error.message));
   if (firstError?.error) {
     throw new Error(`Supabase load failed: ${firstError.error.message}`);
   }
@@ -150,6 +156,8 @@ export async function loadDbFromSupabase(): Promise<DatabaseShape> {
     templates: (templates.data || []) as LocalTemplate[],
     subscriptions: (subscriptions.data || []) as LocalSubscription[],
     notifications: (notifications.data || []) as LocalNotification[],
+    inventory_transactions: inventoryTx.error ? [] : (inventoryTx.data || []),
+    idempotency_keys: idemKeys.error ? [] : (idemKeys.data || []),
   };
 }
 
@@ -252,6 +260,12 @@ export async function saveDbToSupabase(db: DatabaseShape) {
   await upsertTable("whatsapp_templates", templates);
   await upsertTable("subscriptions", subscriptions);
   await upsertTable("notifications", notifications);
+  try {
+    await upsertTable("inventory_transactions", (db.inventory_transactions || []) as unknown as Array<Record<string, unknown>>);
+    await upsertTable("idempotency_keys", (db.idempotency_keys || []) as unknown as Array<Record<string, unknown>>);
+  } catch (err) {
+    console.error("Optional commerce tables upsert skipped:", err);
+  }
 
   await pruneTable("whatsapp_messages", messages);
   await pruneTable("order_items", items);

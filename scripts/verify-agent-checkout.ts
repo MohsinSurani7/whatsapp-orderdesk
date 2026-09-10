@@ -3,8 +3,6 @@ process.env.GEMINI_API_KEY = "";
 process.env.OPENAI_API_KEY = "";
 process.env.AI_API_KEY = "";
 
-const { processAgentMessage } = await import("../src/lib/ai/agent");
-
 const product = {
   id: "p1",
   name: "Sportiva Swing Tee",
@@ -27,7 +25,7 @@ const pending = {
   notes: "revise",
 };
 
-const history = [
+const chatHistory = [
   { role: "assistant" as const, content: "Ab apna delivery address bhej dein." },
   { role: "user" as const, content: "Kashmir Block, Allama Iqbal Town, Lahore" },
   {
@@ -44,7 +42,7 @@ const history = [
 ];
 
 const base = {
-  conversationHistory: history,
+  conversationHistory: chatHistory,
   businessName: "Test Shop",
   agentName: "Order Desk",
   products: [product],
@@ -54,11 +52,12 @@ const base = {
 };
 
 async function run() {
+  const { processAgentMessage } = await import("../src/lib/ai/agent");
   const yes = await processAgentMessage({ ...base, message: "Yes" });
   const hello = await processAgentMessage({
     ...base,
     message: "Hello",
-    conversationHistory: [...history, { role: "user", content: "Yes" }],
+    conversationHistory: [...chatHistory, { role: "user", content: "Yes" }],
   });
   const loveHist = [
     {
@@ -114,3 +113,4 @@ async function run() {
 }
 
 run();
+export {};

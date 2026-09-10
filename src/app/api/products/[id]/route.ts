@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
+import { recordInventoryTxn } from "@/lib/commerce/ledger";
 import { getSessionUserId } from "@/lib/auth/session";
 import { readDb, uid, writeDb } from "@/lib/db/store";
 import { isSupabaseEnabled, uploadProductImage } from "@/lib/db/supabase-sync";
@@ -30,10 +31,12 @@ export async function PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const businessId = await businessIdForUser();
+  const userId = await getSessionUserId();
+  if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const db = await readDb();
+  const businessId = db.members.find((m) => m.user_id === userId)?.business_id ?? null;
   if (!businessId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const { id } = await params;
-  const db = await readDb();
   const product = db.products.find((p) => p.id === id && p.business_id === businessId);
   if (!product) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
@@ -50,7 +53,23 @@ export async function PATCH(
   if (typeof name === "string" && name.trim()) product.name = name.trim();
   if (typeof price === "string" && price) product.price = parseFloat(price);
   if (sku !== null) product.sku = String(sku) || null;
-  if (stock !== null) product.stock = String(stock) ? parseInt(String(stock), 10) : null;
+  if (stock !== null) {
+    const nextStock = String(stock) ? parseInt(String(stock), 10) : null;
+    if (product.stock !== nextStock) {
+      recordInventoryTxn(db, {
+        businessId,
+        productId: product.id,
+        type: "adjustment",
+        quantity: (nextStock ?? 0) - (product.stock ?? 0),
+        previousStock: product.stock,
+        newStock: nextStock,
+        actorType: "staff",
+        actorId: userId,
+        reason: "dashboard_stock_edit",
+      });
+    }
+    product.stock = nextStock;
+  }
   if (description !== null) product.description = String(description) || null;
   if (category !== null) product.category = String(category) || null;
   if (sizes !== null) product.sizes = String(sizes) || null;
@@ -73,7 +92,12 @@ export async function DELETE(
   const db = await readDb();
   const idx = db.products.findIndex((p) => p.id === id && p.business_id === businessId);
   if (idx === -1) return NextResponse.json({ error: "Not found" }, { status: 404 });
-  db.products.splice(idx, 1);
+  const referenced = db.order_items.some((i) => i.product_id === id);
+  if (referenced) {
+    db.products[idx].is_active = false;
+  } else {
+    db.products.splice(idx, 1);
+  }
   await writeDb(db);
-  return NextResponse.json({ ok: true });
+  return NextResponse.json({ ok: true, deactivated: referenced });
 }

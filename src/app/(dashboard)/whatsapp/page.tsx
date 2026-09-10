@@ -114,11 +114,11 @@ export default function WhatsAppAgentPage() {
               defaultValue={String(config?.agent_instructions ?? "")}
               onBlur={(e) => saveConfig({ agent_instructions: e.target.value })}
               rows={4}
-              placeholder="Example: Hum clothing store hain. Cotton suits, lawn, unstitched. Delivery Lahore 200, bahir 400. COD available."
+              placeholder="Extra shop notes: timing, return policy, special offers… Core XStream-Store-Pk rules pehle se system mein hain."
               className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
             />
             <p className="mt-1 text-xs text-gray-500">
-              Agent ChatGPT ki tarah alag se train nahi hota. Groq AI har message padhta hai, dashboard products se jawab deta hai, aur customer ki language follow karta hai.
+              XStream-Store-Pk sales rules, free Pakistan delivery, catalog-only prices, aur cancel/chit-chat locks code mein built-in hain. Yahan sirf extra notes (timing, return, offers) likhein.
             </p>
           </div>
           <div className="grid gap-4 sm:grid-cols-2">

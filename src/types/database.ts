@@ -139,6 +139,7 @@ export interface WhatsAppConversation {
   status: "active" | "awaiting_confirmation" | "closed" | "handed_off";
   pending_order_data: Record<string, unknown> | null;
   agent_paused?: boolean;
+  last_order_idempotency?: string | null;
   last_message_at: string;
   created_at: string;
 }
@@ -160,6 +161,8 @@ export interface ParsedOrderData {
   phone: string | null;
   address: string | null;
   products: Array<{
+    product_id?: string | null;
+    sku?: string | null;
     name: string;
     quantity: number;
     variant: string | null;
@@ -174,6 +177,28 @@ export interface ParsedOrderData {
   notes: string | null;
 }
 
+export type AgentAction =
+  | "none"
+  | "search_products"
+  | "show_product"
+  | "show_product_images"
+  | "show_catalog"
+  | "check_stock"
+  | "add_to_cart"
+  | "remove_from_cart"
+  | "update_cart_item"
+  | "clear_cart"
+  | "view_cart"
+  | "start_checkout"
+  | "collect_customer_info"
+  | "calculate_total"
+  | "confirm_order"
+  | "create_order"
+  | "get_order_status"
+  | "cancel_order"
+  | "modify_order"
+  | "request_human";
+
 export interface AgentResponse {
   intent: AgentIntent;
   reply: string;
@@ -182,6 +207,7 @@ export interface AgentResponse {
   order_id: string | null;
   confidence: number;
   needs_human: boolean;
+  action?: AgentAction;
   send_images?: Array<{
     path: string;
     caption: string;

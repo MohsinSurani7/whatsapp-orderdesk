@@ -6,6 +6,8 @@ export type ShopProduct = {
   image_url?: string | null;
   category?: string | null;
   sizes?: string | null;
+  stock?: number | null;
+  sku?: string | null;
 };
 
 export const DESC_PREVIEW_LEN = 90;
