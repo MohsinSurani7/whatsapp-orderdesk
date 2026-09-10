@@ -7,6 +7,30 @@ export function resolveWhatsAppAuth(config?: {
   return { accessToken, phoneNumberId };
 }
 
+export function explainWhatsAppGraphError(body: string) {
+  const blocked = /API access blocked|code":200|"code": 200/i.test(body);
+  const expired = /expired|code":190|error_subcode":463/i.test(body);
+  const permission = /code":10|permission|not been granted|missing permissions|#200/i.test(body);
+  if (expired) {
+    return {
+      reason: "expired" as const,
+      message:
+        "WhatsApp access token expire ho chuka hai. Meta → System User se naya Permanent token generate karke Dashboard → WhatsApp pe Save Token karein.",
+    };
+  }
+  if (blocked || permission) {
+    return {
+      reason: "blocked" as const,
+      message:
+        "Token save hai, lekin Meta ne WhatsApp API access block kiya hai (error 200). Ye expire nahi — app/permissions ka issue hai. Meta App ko Live mode karein, whatsapp_business_messaging + whatsapp_business_management permissions Advanced Access dein, Phone Number ID isi WABA/app se match karein, aur Business verification complete karein. Development mode mein sirf testers ko message jata hai.",
+    };
+  }
+  return {
+    reason: "graph_error" as const,
+    message: "WhatsApp Graph API ne request reject ki. Phone Number ID, WABA, aur token wali Meta App check karein.",
+  };
+}
+
 type TokenHealth = Awaited<ReturnType<typeof inspectWhatsAppTokenUncached>>;
 
 const healthCache = new Map<string, { at: number; value: TokenHealth }>();
@@ -32,13 +56,11 @@ async function inspectWhatsAppTokenUncached(accessToken: string, phoneNumberId: 
     return { ok: true as const, reason: "ok" as const, message: "WhatsApp token valid hai." };
   }
 
-  const expired = /expired|code":190|error_subcode":463/i.test(body);
+  const parsed = explainWhatsAppGraphError(body);
   return {
     ok: false as const,
-    reason: expired ? ("expired" as const) : ("graph_error" as const),
-    message: expired
-      ? "WhatsApp access token expire ho chuka hai. Dashboard → WhatsApp → naya token paste karke Save Token dabao. Code ya Netlify env change ki zaroorat nahi."
-      : "WhatsApp Graph API token reject kar rahi hai. Dashboard pe Phone Number ID aur token check karo.",
+    reason: parsed.reason,
+    message: parsed.message,
   };
 }
 

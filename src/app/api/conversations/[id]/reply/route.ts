@@ -3,7 +3,7 @@ import { getSessionUserId } from "@/lib/auth/session";
 import { nowIso, readDb, uid, writeDb } from "@/lib/db/store";
 import { uploadChatMedia } from "@/lib/db/supabase-sync";
 import { sendWhatsAppMediaByLink, sendWhatsAppMediaMessage, sendWhatsAppText, uploadWhatsAppMedia } from "@/lib/whatsapp/client";
-import { resolveWhatsAppAuth } from "@/lib/whatsapp/credentials";
+import { explainWhatsAppGraphError, resolveWhatsAppAuth } from "@/lib/whatsapp/credentials";
 
 export const maxDuration = 60;
 
@@ -176,12 +176,9 @@ export async function POST(
     const msg = String(error);
     return NextResponse.json(
       {
-        error:
-          msg.includes("expired") || msg.includes("190")
-            ? "WhatsApp token expire hai. Dashboard → WhatsApp pe naya token save karein."
-            : /audio|ogg|webm|131053/i.test(msg)
-              ? "Voice/photo WhatsApp ne reject ki. Photo JPEG bhejein; voice dubara record karein."
-              : msg.slice(0, 280),
+        error: /audio|ogg|webm|131053/i.test(msg) && !/API access blocked|"code":200/i.test(msg)
+          ? "Voice/photo WhatsApp ne reject ki. Photo JPEG bhejein; voice dubara record karein."
+          : explainWhatsAppGraphError(msg).message,
       },
       { status: 502 }
     );

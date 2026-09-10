@@ -1,4 +1,9 @@
-import { processAgentMessage } from "../src/lib/ai/agent";
+process.env.GROQ_API_KEY = "";
+process.env.GEMINI_API_KEY = "";
+process.env.OPENAI_API_KEY = "";
+process.env.AI_API_KEY = "";
+
+const { processAgentMessage } = await import("../src/lib/ai/agent");
 
 const product = {
   id: "p1",
@@ -55,18 +60,54 @@ async function run() {
     message: "Hello",
     conversationHistory: [...history, { role: "user", content: "Yes" }],
   });
+  const loveHist = [
+    {
+      role: "assistant" as const,
+      content: "Theek hai — draft order cancel. Koi order place nahi hua. Naya order: catalog number ya product naam likhein.",
+    },
+    { role: "user" as const, content: "shop ka name kiya hai?" },
+    { role: "assistant" as const, content: "XStore Pk" },
+    { role: "user" as const, content: "tum kn ho?" },
+  ];
+  const afterCancel = {
+    conversationHistory: loveHist,
+    businessName: "XStore Pk",
+    agentName: "Order Assistant",
+    products: [{ ...product, name: "Full Stack Developer", price: 500000 }],
+    pendingOrder: null,
+    customerName: "Customer",
+    groqApiKey: "skip",
+  };
+  const who = await processAgentMessage({ ...afterCancel, message: "tum kn ho?" });
+  const love = await processAgentMessage({
+    ...afterCancel,
+    message: "mujhy tum sy piyar ho gya hai",
+    conversationHistory: [...loveHist, { role: "assistant", content: who.reply }],
+  });
+  const shopName = await processAgentMessage({
+    ...afterCancel,
+    conversationHistory: [loveHist[0]],
+    message: "shop ka name kiya hai?",
+  });
   const checks = [
     ["yes confirms", yes.should_create_order === true && yes.intent === "confirm_order"],
     ["yes keeps name", yes.parsed_order?.customer_name === "Mohsin Abid"],
     ["hello does not ask naam", !/poora naam|full name|sirf naam/i.test(hello.reply)],
     ["hello keeps name", /Mohsin Abid/i.test(hello.reply) || hello.parsed_order?.customer_name === "Mohsin Abid"],
     ["no duplicate greeting dump", !/assalam o alaikum/i.test(hello.reply)],
+    ["shop name only", /xstore pk/i.test(shopName.reply) && !/payment method/i.test(shopName.reply)],
+    ["who are you no how can i help today", !/how can i help you today/i.test(who.reply)],
+    ["love does not resume payment", !/payment method|easypaisa|1x full stack/i.test(love.reply)],
+    ["love does not recreate order", !love.should_create_order && !(love.parsed_order?.products?.length)],
   ] as Array<[string, boolean]>;
   for (const [label, ok] of checks) {
     console.log(ok ? "PASS" : "FAIL", label);
     if (!ok) {
       console.log("  yes:", yes.intent, yes.should_create_order, yes.reply.slice(0, 180));
       console.log("  hello:", hello.intent, hello.reply.slice(0, 220));
+      console.log("  who:", who.reply.slice(0, 180));
+      console.log("  love:", love.reply.slice(0, 180), love.parsed_order);
+      console.log("  shop:", shopName.reply.slice(0, 180));
     }
   }
   if (checks.some(([, ok]) => !ok)) process.exit(1);

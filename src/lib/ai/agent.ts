@@ -408,6 +408,33 @@ function isSmallTalk(message: string) {
   );
 }
 
+/** Identity / shop / flirt / small chat — NEVER resume checkout. */
+function isChitChatNotOrder(message: string) {
+  const t = message.trim().toLowerCase();
+  if (!t) return false;
+  if (isBuyIntent(t) || isCatalogAsk(t) || isConfirmYes(t) || isSoftNo(t) || isCancelRequest(t)) return false;
+  if (isCatalogIndexPhrase(t) || /^\d{1,2}[.!]?\s*$/.test(t)) return false;
+  if (isSmallTalk(t)) return true;
+  return (
+    /shop (ka )?name|store (ka )?name|business (ka )?name|dukaan (ka )?name/.test(t) ||
+    /tum kaun|tum kn|aap kaun|aap kn|who are you|what(?:'s| is) your name|apna naam|agent ho|bot ho/.test(t) ||
+    /piyar|pyar|love you|i love|marry|shadi|girlfriend|boyfriend|cute ho|beautiful/.test(t) ||
+    /kese ho|kaise ho|kya haal|kia haal|mazak|joke|funny/.test(t)
+  );
+}
+
+function checkoutWasCancelled(history?: Array<{ role: string; content: string }>) {
+  for (const m of [...(history || [])].reverse()) {
+    if (m.role === "assistant" && /draft (order )?cancel|that draft is cancelled|koi confirm order nahi tha|nothing was placed/i.test(m.content)) {
+      return true;
+    }
+    if (m.role === "user" && (isBuyIntent(m.content) || isCatalogIndexPhrase(m.content) || isCatalogAsk(m.content))) {
+      return false;
+    }
+  }
+  return false;
+}
+
 function looksLikePersonName(name?: string | null) {
   if (!name || isBogusName(name)) return false;
   if (/whatsapp customer|full stack|developer|shop|store|official/i.test(name)) return false;
@@ -827,7 +854,7 @@ function inferCheckoutAsk(
 function wantsToLeaveCheckout(message: string) {
   const t = message.toLowerCase();
   if (isCancelRequest(t)) return "cancel" as const;
-  if (isOpenCustomerQuestion(t)) return "browse" as const;
+  if (isChitChatNotOrder(t) || isOpenCustomerQuestion(t)) return "browse" as const;
   if (
     isCatalogAsk(t) ||
     /dusra product|doosra|another item|another product|change product|naya product/.test(t)
@@ -846,14 +873,15 @@ function isOpenCustomerQuestion(message: string) {
   if (looksLikeAddress(t) && looksLikePayment(t)) return false;
   if (/[?؟]/.test(t)) return true;
   if (
-    /^(kya|kyun|kuun|kese|kaise|kab|kahan|kitn|how|what|when|why|where|who|can you|could you|please tell|plz|mujhe bata|batao|suna|sunao|explain)\b/i.test(
+    /^(kya|kia|kyun|kuun|kese|kaise|kab|kahan|kitn|tum kn|aap kn|how|what|when|why|where|who|can you|could you|please tell|plz|mujhe bata|batao|suna|sunao|explain)\b/i.test(
       t
     )
   ) {
     return true;
   }
+  if (isChitChatNotOrder(t)) return true;
   return (
-    /\b(delivery|shipping|discount|offer|warranty|return|refund|original|copy|quality|size kaise|color|colour|timing|open|band|cod kya|easypaisa kaise|matlab|masla|problem|madad|help|available|stock)\b/i.test(
+    /\b(delivery|shipping|discount|offer|warranty|return|refund|original|copy|quality|size kaise|color|colour|timing|open|band|cod kya|easypaisa kaise|matlab|masla|problem|madad|help|available|stock|shop ka name|store ka name)\b/i.test(
       t
     ) && t.split(/\s+/).length >= 2
   );
@@ -900,9 +928,14 @@ function continueLockedOrder(
 ): AgentResponse | null {
   const leave = wantsToLeaveCheckout(params.message);
   if (leave === "browse") return null;
+  if (isChitChatNotOrder(params.message)) return null;
+  if (checkoutWasCancelled(params.conversationHistory) && !isBuyIntent(params.message) && !isCatalogIndexPhrase(params.message)) {
+    return null;
+  }
 
   let pending = hydratePending(params, mergeOrder(params.pendingOrder, null, params.products));
   if (!pending.products.length) {
+    if (checkoutWasCancelled(params.conversationHistory)) return null;
     // "Hello" after a draft must NOT start a new checkout that forgets name/address.
     if (isSmallTalk(params.message) && !opts?.force) return null;
     const offered =
@@ -1545,6 +1578,36 @@ function localAgent(params: {
     needs_human: false,
   };
   const en = inferCustomerLanguage(text, params.conversationHistory) === "English";
+
+  if (isChitChatNotOrder(text)) {
+    const shop = params.businessName;
+    const agent = params.agentName;
+    const cancelled = checkoutWasCancelled(params.conversationHistory);
+    let reply: string;
+    if (/shop (ka )?name|store (ka )?name|business (ka )?name|dukaan (ka )?name/.test(lower)) {
+      reply = shop;
+    } else if (/tum kaun|tum kn|aap kaun|aap kn|who are you|agent ho|bot ho/.test(lower)) {
+      reply = en
+        ? `I'm ${agent} at ${shop} — I take WhatsApp orders.`
+        : `Main ${agent} hoon, ${shop} ka WhatsApp order assistant. Order ke liye product naam likh dena.`;
+    } else if (/piyar|pyar|love you|i love|marry|shadi|girlfriend|boyfriend/.test(lower)) {
+      reply = en
+        ? "That's sweet — I'm just the shop assistant though. If you want to order, send a product name."
+        : "Shukriya 😊 Main shop ka assistant hoon. Order karna ho to product naam likh dena.";
+    } else if (/kese ho|kaise ho|kya haal|kia haal/.test(lower)) {
+      reply = en ? "Doing well — how can I help with an order?" : "Alhamdulillah theek. Boliye, kya chahiye?";
+    } else {
+      reply = en ? "Ji." : "Ji, boliye.";
+    }
+    return {
+      intent: "general",
+      reply,
+      parsed_order: cancelled ? emptyPending() : previous.products.length ? previous : null,
+      confidence: 1,
+      ...empty,
+      skip_media: true,
+    };
+  }
 
   if (isCancelRequest(lower)) {
     return {

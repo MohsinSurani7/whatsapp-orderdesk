@@ -54,12 +54,18 @@ export default function WhatsAppAgentPage() {
       {health && health.ok === false && (
         <Card className="border-red-300 bg-red-50">
           <CardContent className="p-4 text-sm text-red-800">
-            <p className="font-semibold">Agent reply nahi kar raha — WhatsApp token invalid/expired</p>
+            <p className="font-semibold">
+              {health.reason === "blocked"
+                ? "WhatsApp API access Meta ne block kiya hai (token expire nahi)"
+                : "Agent reply nahi kar raha — WhatsApp token/API issue"}
+            </p>
             <p className="mt-1">{health.message}</p>
+            {health.reason === "expired" && (
             <p className="mt-2 text-red-700">
               Meta se naya token generate karke <strong>yahi dashboard</strong> mein Save Token dabao. Code edit ya Netlify
               redeploy ki zaroorat nahi.
             </p>
+            )}
           </CardContent>
         </Card>
       )}

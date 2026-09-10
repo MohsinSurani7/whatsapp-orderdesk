@@ -8,7 +8,7 @@ import {
   markMessageAsRead,
   downloadWhatsAppMedia,
 } from "@/lib/whatsapp/client";
-import { resolveWhatsAppAuth } from "@/lib/whatsapp/credentials";
+import { explainWhatsAppGraphError, resolveWhatsAppAuth } from "@/lib/whatsapp/credentials";
 import { isSupabaseEnabled, uploadChatMedia } from "@/lib/db/supabase-sync";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
@@ -770,9 +770,7 @@ async function recordWhatsAppError(businessId: string, message: string) {
       await sb.from("notifications").insert({
         business_id: businessId,
         title: "WhatsApp send failed",
-        message: /expired|190/i.test(text)
-          ? "WhatsApp access token expire ho gaya. Meta se naya token banao, Netlify env + WhatsApp settings mein save karo."
-          : text,
+        message: explainWhatsAppGraphError(text).message,
         type: "error",
       });
       return;
@@ -782,7 +780,7 @@ async function recordWhatsAppError(businessId: string, message: string) {
       id: uid(),
       business_id: businessId,
       title: "WhatsApp send failed",
-      message: text,
+      message: explainWhatsAppGraphError(text).message,
       type: "error",
       read: false,
       created_at: nowIso(),
