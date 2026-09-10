@@ -88,16 +88,61 @@ async function run() {
     conversationHistory: [loveHist[0]],
     message: "shop ka name kiya hai?",
   });
+  const payPending = {
+    customer_name: "Baloch",
+    phone: null,
+    address: "Ghazi Ghat Punjab Pakistan",
+    products: [{ name: "Sportiva Swing Tee", quantity: 1, variant: null, unit_price: 29 }],
+    subtotal: 29,
+    delivery_fee: 0,
+    discount: 0,
+    total: 29,
+    payment_method: null,
+    payment_status: null,
+    notes: "payment",
+  };
+  const storeMidOrder = await processAgentMessage({
+    ...base,
+    pendingOrder: payPending,
+    message: "apny store ka name batao",
+    groqApiKey: "skip",
+  });
+  const catalogHist = [
+    {
+      role: "assistant" as const,
+      content: "1) Red Shirt — Rs.1000\n2) 3pc Womens Stitched Silk Printed Suit — Rs.2430",
+    },
+  ];
+  const pickNine = await processAgentMessage({
+    conversationHistory: catalogHist,
+    businessName: "XStream-Store-Pk",
+    agentName: "Order Desk",
+    products: [
+      product,
+      { id: "p9", name: "3pc Womens Stitched Silk Printed Suit", price: 2430, description: "suit" },
+    ],
+    pendingOrder: payPending,
+    customerName: "Baloch",
+    groqApiKey: "skip",
+    message: "2",
+  });
   const checks = [
     ["yes confirms", yes.should_create_order === true && yes.intent === "confirm_order"],
     ["yes keeps name", yes.parsed_order?.customer_name === "Mohsin Abid"],
     ["hello does not ask naam", !/poora naam|full name|sirf naam/i.test(hello.reply)],
     ["hello keeps name", /Mohsin Abid/i.test(hello.reply) || hello.parsed_order?.customer_name === "Mohsin Abid"],
     ["no duplicate greeting dump", !/assalam o alaikum/i.test(hello.reply)],
-    ["shop name only", /xstore pk/i.test(shopName.reply) && !/payment method/i.test(shopName.reply)],
+    ["shop name only", /xstream-store-pk/i.test(shopName.reply) && !/payment method/i.test(shopName.reply)],
     ["who are you no how can i help today", !/how can i help you today/i.test(who.reply)],
     ["love does not resume payment", !/payment method|easypaisa|1x full stack/i.test(love.reply)],
     ["love does not recreate order", !love.should_create_order && !(love.parsed_order?.products?.length)],
+    [
+      "store name mid checkout not payment",
+      /xstream-store-pk/i.test(storeMidOrder.reply) && !/payment method|easypaisa|apna naam/i.test(storeMidOrder.reply),
+    ],
+    ["catalog pick asks qty", /quantity kitni chahiye|how many pieces/i.test(pickNine.reply)],
+    ["catalog pick ignores old name", pickNine.parsed_order?.customer_name !== "Baloch"],
+    ["catalog pick ignores old address", !/ghazi ghat/i.test(String(pickNine.parsed_order?.address || ""))],
   ] as Array<[string, boolean]>;
   for (const [label, ok] of checks) {
     console.log(ok ? "PASS" : "FAIL", label);
@@ -106,7 +151,8 @@ async function run() {
       console.log("  hello:", hello.intent, hello.reply.slice(0, 220));
       console.log("  who:", who.reply.slice(0, 180));
       console.log("  love:", love.reply.slice(0, 180), love.parsed_order);
-      console.log("  shop:", shopName.reply.slice(0, 180));
+      console.log("  store:", storeMidOrder.reply.slice(0, 180));
+      console.log("  pick:", pickNine.reply.slice(0, 220), pickNine.parsed_order);
     }
   }
   if (checks.some(([, ok]) => !ok)) process.exit(1);
