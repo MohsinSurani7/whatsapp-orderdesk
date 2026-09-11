@@ -1,19 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
 import { encryptSecret } from "@/lib/crypto/secrets";
+import { metaAppSecret, metaPublicSignupConfig } from "@/lib/env/server";
 import { getSessionUserId } from "@/lib/auth/session";
 import { nowIso, readDb, writeDb } from "@/lib/db/store";
 import { slog } from "@/lib/observability/log";
 
-const GRAPH = `https://graph.facebook.com/${process.env.META_GRAPH_VERSION || "v21.0"}`;
-
 export async function GET() {
   const userId = await getSessionUserId();
   if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const pub = metaPublicSignupConfig();
   return NextResponse.json({
-    appId: process.env.META_APP_ID || "",
-    configId: process.env.META_EMBEDDED_SIGNUP_CONFIG_ID || "",
-    graphVersion: process.env.META_GRAPH_VERSION || "v21.0",
-    configured: Boolean(process.env.META_APP_ID && process.env.META_APP_SECRET && process.env.META_EMBEDDED_SIGNUP_CONFIG_ID),
+    appId: pub.appId,
+    configId: pub.configId,
+    graphVersion: pub.graphVersion,
+    configured: pub.configured,
   });
 }
 
@@ -24,11 +24,13 @@ export async function POST(request: NextRequest) {
   const businessId = db.members.find((m) => m.user_id === userId)?.business_id;
   if (!businessId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const appId = process.env.META_APP_ID || "";
-  const secret = process.env.META_APP_SECRET || "";
+  const pub = metaPublicSignupConfig();
+  const appId = pub.appId;
+  const secret = metaAppSecret();
+  const GRAPH = `https://graph.facebook.com/${pub.graphVersion}`;
   if (!appId || !secret) {
     return NextResponse.json(
-      { error: "META_APP_ID and META_APP_SECRET must be set on the server." },
+      { error: "Meta Embedded Signup is not fully configured on the server." },
       { status: 400 }
     );
   }

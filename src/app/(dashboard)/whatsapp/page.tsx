@@ -25,7 +25,7 @@ function ConnectWhatsApp({
     const meta = await fetch("/api/whatsapp/embedded-signup").then((r) => r.json());
     if (!meta.configured) {
       setBusy(false);
-      setError("Server pe META_APP_ID, META_APP_SECRET, META_EMBEDDED_SIGNUP_CONFIG_ID set karein.");
+      setError("Meta Embedded Signup server pe configured nahi hai. App ID + Config ID env check karein.");
       return;
     }
     await new Promise<void>((resolve, reject) => {
