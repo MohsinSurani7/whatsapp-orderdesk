@@ -7,7 +7,7 @@ function read(name: string) {
 export function metaPublicSignupConfig() {
   const appId = read("META_APP_ID");
   const configId = read("META_EMBEDDED_SIGNUP_CONFIG_ID");
-  const graphVersion = read("META_GRAPH_VERSION") || "v21.0";
+  const graphVersion = read("META_GRAPH_VERSION") || "v26.0";
   return {
     appId,
     configId,
