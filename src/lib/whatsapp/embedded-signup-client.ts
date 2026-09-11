@@ -128,7 +128,8 @@ export function launchWhatsAppEmbeddedSignup(meta: EmbeddedSignupMeta): Promise<
   code: string;
   session: EmbeddedSignupSession;
 }> {
-  if (!window.FB) {
+  const facebookSdk = window.FB;
+  if (!facebookSdk) {
     return Promise.reject(new Error("Facebook SDK abhi ready nahi. Page refresh karke dubara try karein."));
   }
 
@@ -152,7 +153,7 @@ export function launchWhatsAppEmbeddedSignup(meta: EmbeddedSignupMeta): Promise<
 
     window.addEventListener("message", handler);
 
-    window.FB.login(
+    facebookSdk.login(
       (response) => {
         window.removeEventListener("message", handler);
         const code = response.authResponse?.code;
