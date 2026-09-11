@@ -1,9 +1,13 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { launchWhatsAppEmbeddedSignup } from "@/lib/whatsapp/embedded-signup-client";
+import {
+  launchWhatsAppEmbeddedSignup,
+  loadMetaSdk,
+  type EmbeddedSignupMeta,
+} from "@/lib/whatsapp/embedded-signup-client";
 
 export function EmbeddedSignupConnect({
   config,
@@ -14,45 +18,64 @@ export function EmbeddedSignupConnect({
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [sdkReady, setSdkReady] = useState(false);
+  const metaRef = useRef<EmbeddedSignupMeta | null>(null);
   const connected = Boolean(config?.has_token && config?.phone_number_id);
 
-  async function connect() {
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const metaRes = await fetch("/api/whatsapp/embedded-signup");
+        const meta = await metaRes.json();
+        if (!meta.configured || !meta.appId || !meta.configId) return;
+        const packed: EmbeddedSignupMeta = {
+          appId: meta.appId,
+          configId: meta.configId,
+          graphVersion: meta.graphVersion || "v26.0",
+        };
+        metaRef.current = packed;
+        await loadMetaSdk(packed);
+        if (!cancelled) setSdkReady(true);
+      } catch {
+        if (!cancelled) setSdkReady(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  function connect() {
     setError("");
-    setBusy(true);
-    try {
-      const metaRes = await fetch("/api/whatsapp/embedded-signup");
-      const meta = await metaRes.json();
-      if (!meta.configured || !meta.appId || !meta.configId) {
-        throw new Error(
-          "Meta Embedded Signup configured nahi. META_APP_ID aur META_EMBEDDED_SIGNUP_CONFIG_ID set karein."
-        );
-      }
-
-      const { code, session } = await launchWhatsAppEmbeddedSignup({
-        appId: meta.appId,
-        configId: meta.configId,
-        graphVersion: meta.graphVersion || "v26.0",
-      });
-
-      const save = await fetch("/api/whatsapp/embedded-signup", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          code,
-          waba_id: session.waba_id || null,
-          phone_number_id: session.phone_number_id || null,
-        }),
-      });
-      const data = await save.json();
-      if (!save.ok || data.error) {
-        throw new Error(data.error || "Backend ne WhatsApp connect save nahi kiya.");
-      }
-      onRefresh();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
+    const meta = metaRef.current;
+    if (!meta || !window.FB) {
+      setError("Facebook SDK ready nahi. Page refresh karke dubara Connect dabayein.");
+      return;
     }
+
+    setBusy(true);
+    launchWhatsAppEmbeddedSignup(meta)
+      .then(async ({ code, session }) => {
+        const save = await fetch("/api/whatsapp/embedded-signup", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            code,
+            waba_id: session.waba_id || null,
+            phone_number_id: session.phone_number_id || null,
+          }),
+        });
+        const data = await save.json();
+        if (!save.ok || data.error) {
+          throw new Error(data.error || "Backend ne WhatsApp connect save nahi kiya.");
+        }
+        onRefresh();
+      })
+      .catch((e) => {
+        setError(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => setBusy(false));
   }
 
   async function disconnect() {
@@ -84,8 +107,8 @@ export function EmbeddedSignupConnect({
           </div>
         )}
         {!connected ? (
-          <Button onClick={connect} disabled={busy}>
-            {busy ? "Connecting…" : "Connect WhatsApp"}
+          <Button onClick={connect} disabled={busy || !sdkReady}>
+            {busy ? "Connecting…" : sdkReady ? "Connect WhatsApp" : "Loading Facebook SDK…"}
           </Button>
         ) : (
           <Button variant="destructive" onClick={disconnect}>
@@ -93,10 +116,42 @@ export function EmbeddedSignupConnect({
           </Button>
         )}
         {error && <p className="text-red-700">{error}</p>}
-        <p className="text-xs text-gray-500">
-          Ye Meta WhatsApp Embedded Signup flow hai (Facebook Login for Business). Popup mein WhatsApp Business
-          account / phone number connect karein — sirf Facebook app login nahi.
-        </p>
+        <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-950 space-y-2">
+          <p className="font-semibold">Ye errors Meta app dashboard se aate hain, code se nahi:</p>
+          <p>
+            <strong>App not active</strong> = app Development mode mein hai. Dusra Facebook account tabhi connect ho
+            sakta hai jab woh App Roles mein Admin/Developer/Tester ho, ya app <strong>Live</strong> ho.
+          </p>
+          <p>
+            <strong>Sorry, something went wrong</strong> = Embedded Signup config galat hai, app type Business nahi,
+            ya domain allow nahi.
+          </p>
+          <ol className="list-decimal pl-4 space-y-1">
+            <li>
+              Meta Developers → App → top toggle <strong>Live</strong> (Privacy Policy URL + App Mode Live). Testing
+              ke liye dusre account ko <strong>App Roles → Testers</strong> add karein.
+            </li>
+            <li>App type <strong>Business</strong> hona chahiye (Consumer/Personal nahi).</li>
+            <li>Products: WhatsApp + Facebook Login for Business.</li>
+            <li>
+              Facebook Login for Business → Configurations → template{" "}
+              <strong>WhatsApp Embedded Signup</strong> (v4). Jo Config ID mile woh{" "}
+              <code>META_EMBEDDED_SIGNUP_CONFIG_ID</code> mein daalein.
+            </li>
+            <li>
+              Facebook Login → Settings: Client OAuth, Web OAuth, Login with JavaScript SDK ON. Allowed domains + Valid
+              OAuth Redirect URIs:
+              <br />
+              <code>https://wtsapp-orderdesk.netlify.app</code>
+              <br />
+              <code>https://wtsapp-orderdesk.netlify.app/</code>
+            </li>
+            <li>
+              App Dashboard → WhatsApp → Embedded Signup Builder se test karein. Wahan bhi same error aaye to problem
+              100% Meta config hai.
+            </li>
+          </ol>
+        </div>
       </CardContent>
     </Card>
   );
