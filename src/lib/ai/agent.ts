@@ -12,6 +12,17 @@ import {
 } from "@/lib/catalog";
 import { ORDER_DESK_SHOTS, XSTREAM_STORE_FACTS, buildOrderDeskSystem } from "@/lib/ai/order-desk-prompt";
 import { addCartLine, formatCartLines, removeCartLine, setCartLineQty, type CartLine } from "@/lib/commerce/cart";
+import {
+  attachCatalogIndex,
+  isAddAnotherIntent,
+  isCartBuilding,
+  isCheckoutIntent,
+  isDeliveryQuestion,
+  parseCatalogNumber,
+  parseIndexAndQuantity,
+  productFromIndex,
+} from "@/lib/ai/catalog-select";
+import { executeAgentTool, formatCartReceipt } from "@/lib/ai/tools";
 
 type CatalogProduct = ShopProduct;
 
@@ -39,6 +50,12 @@ type AgentParams = {
   jazzcashNumber?: string | null;
   selectedCategory?: string | null;
   seeMoreProductId?: string | null;
+  groqModel?: string | null;
+  groqTemperature?: number | null;
+  groqMaxTokens?: number | null;
+  deliveryPolicy?: string | null;
+  paymentOptions?: string | null;
+  aliases?: Array<{ alias: string; product_id: string }>;
 };
 
 function looksLikeRealKey(key?: string) {
@@ -55,13 +72,17 @@ const GROQ_MODELS = [
   "llama-3.3-70b-versatile",
 ].filter((m, i, arr): m is string => Boolean(m) && arr.indexOf(m) === i);
 
-function getAIClient(shopGroqKey?: string | null): { client: OpenAI; model: string; models: string[] } | null {
+function getAIClient(
+  shopGroqKey?: string | null,
+  preferredModel?: string | null
+): { client: OpenAI; model: string; models: string[] } | null {
   const groq = (shopGroqKey || process.env.GROQ_API_KEY || "").trim();
   if (looksLikeRealKey(groq)) {
+    const models = [preferredModel, ...GROQ_MODELS].filter((m, i, arr): m is string => Boolean(m) && arr.indexOf(m) === i);
     return {
       client: new OpenAI({ apiKey: groq, baseURL: "https://api.groq.com/openai/v1" }),
-      model: GROQ_MODELS[0],
-      models: GROQ_MODELS,
+      model: models[0],
+      models,
     };
   }
   const gemini = process.env.GEMINI_API_KEY;
@@ -147,11 +168,29 @@ export async function processAgentMessage(params: AgentParams): Promise<AgentRes
     return identityReply(params);
   }
 
+  if (isDeliveryQuestion(params.message)) {
+    const keep = mergeOrder(params.pendingOrder, null, params.products);
+    const policy =
+      params.deliveryPolicy ||
+      "Delivery Pakistan-wide available hai. Charges shop policy ke mutabiq hain — product select nahi hota sirf delivery poochne se.";
+    return {
+      intent: "delivery_inquiry",
+      reply: policy,
+      parsed_order: keep.products.length || keep.catalog_index?.length ? keep : emptyPending(),
+      should_create_order: false,
+      order_id: null,
+      confidence: 1,
+      needs_human: false,
+      skip_media: true,
+    };
+  }
+
   const photoOrDetail = isPhotoRequest(params.message.toLowerCase()) || isShowOrDetailAsk(params.message.toLowerCase());
   const catalogNumberPick = resolveNumberedProductPick(
     params.message,
     params.conversationHistory,
-    params.products
+    params.products,
+    mergeOrder(params.pendingOrder, null, params.products)
   );
   if (catalogNumberPick && "invalid" in catalogNumberPick && catalogNumberPick.invalid) {
     return invalidCatalogNumberReply(params, catalogNumberPick.index);
@@ -191,10 +230,16 @@ export async function processAgentMessage(params: AgentParams): Promise<AgentRes
   const revising = String(params.pendingOrder?.notes || "") === "revise";
   if (
     catalogNumberPick?.product &&
-    (isCatalogIndexPhrase(params.message) || (!revising && lastWasCatalogList) || /product\s*\d+/i.test(params.message))
+    (isCatalogIndexPhrase(params.message) ||
+      isAddAnotherIntent(params.message) ||
+      (!revising && lastWasCatalogList) ||
+      /product\s*\d+/i.test(params.message))
   ) {
-    const qtyInMsg = extractQuantity(params.message);
-    if (qtyInMsg) return lockProductForCheckout(params, catalogNumberPick.product, qtyInMsg, { fresh: true });
+    const combo = parseIndexAndQuantity(params.message);
+    const qtyInMsg = combo?.quantity || extractQuantity(params.message);
+    if (qtyInMsg && !/^\d{1,2}[.!]?\s*$/.test(params.message.trim())) {
+      return lockProductForCheckout(params, catalogNumberPick.product, qtyInMsg, { fresh: false, keepCart: true });
+    }
     return startFreshProductOrder(params, catalogNumberPick.product);
   }
 
@@ -210,8 +255,14 @@ export async function processAgentMessage(params: AgentParams): Promise<AgentRes
       ? findProductInText(String(pendingProductName(params.pendingOrder)).toLowerCase(), params.products)
       : null);
 
-  if (qtyReply != null && offered && lastAskQty && !lastWasCatalogList) {
-    return lockProductForCheckout(params, offered, qtyReply, { fresh: false });
+  const mergedPending = mergeOrder(params.pendingOrder, null, params.products);
+  const pendingHit = mergedPending.pending_product_id
+    ? (params.products || []).find(
+        (p) => p.id === mergedPending.pending_product_id || p.name === mergedPending.pending_product_id
+      )
+    : null;
+  if (qtyReply != null && (pendingHit || (offered && lastAskQty && !lastWasCatalogList))) {
+    return lockProductForCheckout(params, pendingHit || offered!, qtyReply, { fresh: false, keepCart: true });
   }
 
   // Locked checkout: Groq must NOT greet / restart catalog while collecting name/address/payment
@@ -289,7 +340,7 @@ export async function processAgentMessage(params: AgentParams): Promise<AgentRes
     working = { ...working, selectedCategory: categoryHint };
   }
 
-  const ai = getAIClient(working.groqApiKey);
+  const ai = getAIClient(working.groqApiKey, working.groqModel);
   let result: AgentResponse;
   if (ai) {
     try {
@@ -401,27 +452,28 @@ function presentedCatalogProducts(
 function resolveNumberedProductPick(
   message: string,
   history: Array<{ role: string; content: string }> | undefined,
-  products?: CatalogProduct[]
+  products?: CatalogProduct[],
+  pending?: ParsedOrderData | null
 ): { index: number; product: CatalogProduct } | { index: number; product: null; invalid: true } | null {
   if (!products?.length) return null;
   const t = message.trim();
-  const m =
-    t.match(/(?:product|item|option|number|no\.?|#)\s*(\d{1,2})\b/i) ||
-    t.match(/^(\d{1,2})\s*(?:number|no\.?|#)?\s*(?:wala|wali|wale)?[.!]?$/i) ||
-    t.match(/\b(\d{1,2})\s*(?:number|no\.?|#)\s*(?:wala|wali|wale)?/i) ||
-    t.match(/\b(\d{1,2})\s*(?:ki|ka|ke)?\s*(?:photo|tasveer|pic|image|detail)/i);
-  const n = m ? parseInt(m[1], 10) : null;
-  if (!n || n < 1) return null;
+  const combo = parseIndexAndQuantity(t);
+  const n = combo?.index || parseCatalogNumber(t);
+  if (!n) return null;
+
+  const lastWasList = assistantHadNumberedCatalog(history);
+  const lastAskQty = lastAssistantAskedQuantity(history);
+  const bare = /^\d{1,2}[.!]?\s*$/.test(t);
+  if (bare && (pending?.notes === "qty" || lastAskQty)) return null;
+  if (bare && !lastWasList && !pending?.catalog_index?.length) return null;
+
+  const fromIndex = productFromIndex(n, pending, products);
+  if (fromIndex) return { index: n, product: fromIndex };
 
   const presented = presentedCatalogProducts(history, products);
   const live = products.slice(0, 40);
-  const lastWasList = assistantHadNumberedCatalog(history);
-  const explicit = isCatalogIndexPhrase(t) || /product\s*\d+|item\s*\d+|#\s*\d+/i.test(t);
-  const bare = /^\d{1,2}[.!]?\s*$/.test(t);
-
-  if (bare && !lastWasList) return null;
-
-  const list = presented && lastWasList ? presented : explicit || lastWasList ? live : null;
+  const explicit = isCatalogIndexPhrase(t) || /product\s*\d+|item\s*\d+|#\s*\d+/i.test(t) || isAddAnotherIntent(t);
+  const list = presented && lastWasList ? presented : explicit || lastWasList || pending?.catalog_index?.length ? live : null;
   if (!list) return null;
   const product = list[n - 1];
   if (!product) return { index: n, product: null, invalid: true };
@@ -459,7 +511,7 @@ function isCatalogIndexPhrase(message: string) {
   return (
     /\d+\s*(?:number|no\.?|#)\s*(?:wala|wali|wale)?/i.test(message) ||
     /\b(?:item|option|product)\s*\d+/i.test(message) ||
-    /^\d{1,2}\s*(?:wala|wali|wale)[.!]?$/i.test(message.trim())
+    /\b\d{1,2}\s*(?:wala|wali|wale)\b/i.test(message)
   );
 }
 
@@ -688,7 +740,28 @@ function handleDecline(params: AgentParams): AgentResponse | null {
     if (choice) return choice;
   }
 
-  if (!isSoftNo(params.message)) return null;
+  if (!isSoftNo(params.message) && !/^nahi lena\b/i.test(params.message.trim())) return null;
+
+  if (pending.pending_product_id || pending.notes === "qty") {
+    return {
+      intent: "place_order",
+      reply: en
+        ? "Okay, that pending item is cancelled. Your cart is unchanged."
+        : "Theek, woh pending item cancel. Cart same hai.",
+      parsed_order: {
+        ...pending,
+        pending_product_id: null,
+        pending_action: null,
+        notes: pending.products.length ? "cart" : null,
+        session_phase: pending.products.length ? "CART_BUILDING" : "BROWSING",
+      },
+      should_create_order: false,
+      order_id: null,
+      confidence: 1,
+      needs_human: false,
+      skip_media: true,
+    };
+  }
 
   // Confirm step: "no" means don't place — keep data, ask what to edit
   if (pending.products.length && (complete || askedConfirm)) {
@@ -749,13 +822,19 @@ function startFreshProductOrder(params: AgentParams, product: CatalogProduct): A
   const numericPick = /^\d{1,2}[.!]?\s*$/.test(params.message.trim());
   const en = !numericPick && inferCustomerLanguage(params.message, params.conversationHistory) === "English";
   const shortage = stockShortage(product, 1);
+  const keep = mergeOrder(params.pendingOrder, null, params.products);
+  const adding =
+    isAddAnotherIntent(params.message) ||
+    keep.session_phase === "CART_BUILDING" ||
+    keep.notes === "cart" ||
+    keep.notes === "qty";
   if (shortage && shortage.left <= 0) {
     return {
       intent: "product_inquiry",
       reply: en
         ? `${product.name} is out of stock right now.`
         : `${product.name} filhal out of stock hai.`,
-      parsed_order: emptyPending(),
+      parsed_order: keep.products.length ? keep : emptyPending(),
       should_create_order: false,
       order_id: null,
       confidence: 1,
@@ -765,18 +844,16 @@ function startFreshProductOrder(params: AgentParams, product: CatalogProduct): A
   }
   const pending = matchCatalog(
     {
-      ...emptyPending(),
-      products: [
-        {
-          product_id: product.id || null,
-          sku: product.sku || null,
-          name: product.name,
-          quantity: 1,
-          variant: null,
-          unit_price: product.price,
-        },
-      ],
+      ...keep,
+      products: adding ? keep.products : [],
+      customer_name: adding ? keep.customer_name : null,
+      address: adding ? keep.address : null,
+      payment_method: adding ? keep.payment_method : null,
       notes: "qty",
+      session_phase: "CART_BUILDING",
+      pending_product_id: product.id || product.name,
+      pending_action: "ADD_PRODUCT",
+      catalog_index: keep.catalog_index,
     },
     params.products
   );
@@ -799,18 +876,19 @@ function lockProductForCheckout(
   params: AgentParams,
   product: CatalogProduct,
   qty: number,
-  opts?: { fresh?: boolean }
+  opts?: { fresh?: boolean; keepCart?: boolean }
 ): AgentResponse {
   const en = inferCustomerLanguage(params.message, params.conversationHistory) === "English";
   const want = Math.max(1, qty);
   const shortage = stockShortage(product, want);
+  const keepCart = opts?.keepCart || opts?.fresh === false;
   if (shortage && shortage.left <= 0) {
     return {
       intent: "product_inquiry",
       reply: en
         ? `${product.name} is out of stock right now. I can show similar items from the catalog if you want.`
         : `${product.name} filhal out of stock hai. Similar listed items dikha sakta hoon — boliye.`,
-      parsed_order: opts?.fresh ? emptyPending() : params.pendingOrder ? mergeOrder(params.pendingOrder, null, params.products) : null,
+      parsed_order: keepCart ? mergeOrder(params.pendingOrder, null, params.products) : emptyPending(),
       should_create_order: false,
       order_id: null,
       confidence: 1,
@@ -824,7 +902,7 @@ function lockProductForCheckout(
       reply: en
         ? `Only ${shortage.left} piece(s) of ${product.name} are available. Should I lock ${shortage.left}?`
         : `${product.name} ke sirf ${shortage.left} pieces available hain. ${shortage.left} ka order karna chahenge?`,
-      parsed_order: opts?.fresh ? emptyPending() : params.pendingOrder ? mergeOrder(params.pendingOrder, null, params.products) : null,
+      parsed_order: keepCart ? mergeOrder(params.pendingOrder, null, params.products) : emptyPending(),
       should_create_order: false,
       order_id: null,
       confidence: 1,
@@ -832,51 +910,34 @@ function lockProductForCheckout(
       skip_media: true,
     };
   }
-  const prev = opts?.fresh
-    ? emptyPending()
-    : mergeOrder(params.pendingOrder, null, params.products);
-  const baseProducts =
-    opts?.fresh === false
-      ? prev.products.map((p) =>
-          p.name.toLowerCase() === product.name.toLowerCase() ? { ...p, quantity: want, unit_price: product.price } : p
-        )
-      : prev.products;
-  const hasLine = baseProducts.some((p) => p.name.toLowerCase() === product.name.toLowerCase());
-  const lines = hasLine
-    ? baseProducts
-    : addCartLine(baseProducts as CartLine[], {
-        product_id: product.id || null,
-        sku: product.sku || null,
-        name: product.name,
-        quantity: want,
-        variant: null,
-        unit_price: product.price,
-      });
+  const prev = keepCart ? mergeOrder(params.pendingOrder, null, params.products) : emptyPending();
+  const added = executeAgentTool(
+    "add_to_cart",
+    { product_id: product.id, quantity: want },
+    { businessId: "session", products: params.products || [], pending: { ...prev, pending_product_id: null } }
+  );
   const pending = matchCatalog(
     {
-      ...prev,
-      customer_name: opts?.fresh || isBogusName(prev.customer_name) ? null : prev.customer_name,
-      address: opts?.fresh ? null : prev.address,
-      payment_method: opts?.fresh ? null : prev.payment_method,
-      products: lines,
-      notes: null,
+      ...added.pending,
+      catalog_index: prev.catalog_index,
+      customer_name: keepCart && !isBogusName(prev.customer_name) ? prev.customer_name : null,
+      address: keepCart ? prev.address : null,
+      payment_method: keepCart ? prev.payment_method : null,
+      session_phase: "CART_BUILDING",
+      notes: "cart",
+      pending_product_id: null,
+      pending_action: null,
     },
     params.products
   );
-  const clean = hydratePending(params, pending);
-  const missing = nextMissingField(clean, params.products);
-  const line = clean.products.find((p) => p.name.toLowerCase() === product.name.toLowerCase()) || clean.products[0];
+  const receipt = formatCartReceipt(pending);
   return {
     intent: "place_order",
     action: "add_to_cart",
     reply: en
-      ? `Got it — ${line.quantity}x ${product.name} (Rs.${product.price}).${
-          missing ? ` Please share your ${missing.prompt}.` : ' Reply "yes" to confirm.'
-        }`
-      : `Theek hai — ${line.quantity}x ${product.name} (Rs.${product.price}).${
-          missing ? ` Baraye meherbani apna ${missing.prompt} bhej dein.` : ' Confirm ke liye "yes" likhein.'
-        }`,
-    parsed_order: missing ? { ...clean, notes: missing.key } : clean,
+      ? `${receipt}\n\nAdd another item, or type "checkout" to place the order.`
+      : `${receipt}\n\nAur item add karein, "cart dikhao", ya "checkout" / "order place karo" likhein.`,
+    parsed_order: pending,
     should_create_order: false,
     order_id: null,
     confidence: 1,
@@ -898,6 +959,10 @@ function emptyPending(): ParsedOrderData {
     payment_method: null,
     payment_status: null,
     notes: null,
+    session_phase: null,
+    pending_product_id: null,
+    pending_action: null,
+    catalog_index: [],
   };
 }
 
@@ -960,9 +1025,12 @@ function fullCatalogReply(params: AgentParams): AgentResponse {
   return {
     intent: "product_inquiry",
     reply: catalogReply(params.businessName, products),
-    parsed_order: mergeOrder(params.pendingOrder, null, params.products).products.length
-      ? mergeOrder(params.pendingOrder, null, params.products)
-      : emptyPending(),
+    parsed_order: attachCatalogIndex(
+      mergeOrder(params.pendingOrder, null, params.products).products.length
+        ? mergeOrder(params.pendingOrder, null, params.products)
+        : emptyPending(),
+      products
+    ),
     should_create_order: false,
     order_id: null,
     confidence: 1,
@@ -1137,15 +1205,15 @@ function continueLockedOrder(
 
   let pending = hydratePending(params, mergeOrder(params.pendingOrder, null, params.products));
   const en = inferCustomerLanguage(params.message, params.conversationHistory) === "English";
-  const cartEditEarly = applyCartEdit(params.message, pending, params.products);
-  if (cartEditEarly) {
-    pending = hydratePending(params, { ...pending, products: cartEditEarly.products });
-    const missingCart = nextMissingField(pending, params.products);
+  if (isCheckoutIntent(params.message) && pending.products.length) {
+    pending = { ...pending, session_phase: "COLLECTING_CUSTOMER_NAME", notes: "naam" };
     return {
       intent: "place_order",
-      action: cartEditEarly.action,
-      reply: en ? cartEditEarly.replyEn : cartEditEarly.replyUr,
-      parsed_order: missingCart ? { ...pending, notes: missingCart.key } : pending,
+      action: "start_checkout",
+      reply: en
+        ? `${formatCartReceipt(pending)}\n\nCheckout shuru. Please share your full name.`
+        : `${formatCartReceipt(pending)}\n\nCheckout shuru. Ab apna poora naam bhej dein.`,
+      parsed_order: pending,
       should_create_order: false,
       order_id: null,
       confidence: 1,
@@ -1153,22 +1221,40 @@ function continueLockedOrder(
       skip_media: true,
     };
   }
-  if (!pending.products.length) return null;
-
-  pending = hydratePending(params, pending);
-  if (String(pending.notes || "") === "qty" && pending.products.length) {
-    const q = extractQuantity(params.message.toLowerCase()) || (params.message.trim().match(/^(\d{1,4})\s*[.!]?$/) ? parseInt(params.message.trim(), 10) : null);
-    const prod = (params.products || []).find(
-      (p) => p.name.toLowerCase() === pending.products[0].name.toLowerCase()
-    );
-    if (q && prod) return lockProductForCheckout(params, prod, q, { fresh: false });
-    if (!isConfirmYes(params.message)) {
+  const cartEditEarly = applyCartEdit(params.message, pending, params.products);
+  if (cartEditEarly) {
+    pending = hydratePending(params, { ...pending, products: cartEditEarly.products, notes: cartEditEarly.products.length ? "cart" : null });
+    return {
+      intent: "place_order",
+      action: cartEditEarly.action,
+      reply: en ? cartEditEarly.replyEn : cartEditEarly.replyUr,
+      parsed_order: pending,
+      should_create_order: false,
+      order_id: null,
+      confidence: 1,
+      needs_human: false,
+      skip_media: true,
+    };
+  }
+  if (String(pending.notes || "") === "qty" || pending.pending_product_id) {
+    const q =
+      extractQuantity(params.message.toLowerCase()) ||
+      (params.message.trim().match(/^(\d{1,4})\s*[.!]?$/) ? parseInt(params.message.trim(), 10) : null);
+    const prod =
+      (params.products || []).find(
+        (p) => p.id === pending.pending_product_id || p.name === pending.pending_product_id
+      ) ||
+      (pending.products[0]
+        ? (params.products || []).find((p) => p.name.toLowerCase() === pending.products[0].name.toLowerCase())
+        : null);
+    if (q && prod) return lockProductForCheckout(params, prod, q, { fresh: false, keepCart: true });
+    if (prod && !isConfirmYes(params.message) && !isCatalogIndexPhrase(params.message) && !isAddAnotherIntent(params.message)) {
       return {
         intent: "place_order",
         reply: en
-          ? `You selected ${pending.products[0].name} — Rs.${pending.products[0].unit_price ?? ""}. How many pieces?`
-          : `Ap ne ${pending.products[0].name} select kiya hai — Rs.${pending.products[0].unit_price ?? ""}. Quantity kitni chahiye?`,
-        parsed_order: { ...pending, notes: "qty" },
+          ? `You selected ${prod.name} — Rs.${prod.price}. How many pieces?`
+          : `Ap ne ${prod.name} select kiya hai — Rs.${prod.price}. Quantity kitni chahiye?`,
+        parsed_order: pending,
         should_create_order: false,
         order_id: null,
         confidence: 1,
@@ -1177,6 +1263,7 @@ function continueLockedOrder(
       };
     }
   }
+  if (!pending.products.length) return null;
   if (String(pending.notes || "") === "revise") {
     if (isConfirmYes(params.message) && orderLooksComplete(pending, params.products)) {
       return {
@@ -1265,7 +1352,7 @@ function continueLockedOrder(
     };
   }
 
-  if (confirming && complete && !isSoftNo(params.message)) {
+  if (confirming && complete && !isCartBuilding(pending) && !isSoftNo(params.message)) {
     const issues = pending.products
       .map((item) => {
         const catalogHit = (params.products || []).find(
@@ -1321,6 +1408,20 @@ function continueLockedOrder(
 
   const missing = nextMissingField(pending, params.products);
   const snap = checkoutSnapshot(pending, en);
+  if (isCartBuilding(pending) && !missing) {
+    return {
+      intent: "place_order",
+      reply: en
+        ? `${formatCartReceipt(pending)}\n\nAdd another item or type "checkout".`
+        : `${formatCartReceipt(pending)}\n\nAur item add karein ya "checkout" likhein.`,
+      parsed_order: { ...pending, notes: "cart", session_phase: "CART_BUILDING" },
+      should_create_order: false,
+      order_id: null,
+      confidence: 1,
+      needs_human: false,
+      skip_media: true,
+    };
+  }
   if (missing) {
     const prompt =
       missing.key === "payment" ? paymentPrompt(params, en) : missing.prompt;
@@ -1644,7 +1745,8 @@ LATEST_CUSTOMER_MESSAGE: ${params.message}`;
   const catalogPick = resolveNumberedProductPick(
     params.message,
     params.conversationHistory,
-    params.products
+    params.products,
+    mergeOrder(params.pendingOrder, null, params.products)
   );
   const startedNow =
     isBuyIntent(params.message) ||
@@ -2232,6 +2334,7 @@ function isBuyIntent(lower: string) {
 }
 
 function isOrderTrackQuery(lower: string) {
+  if (/cart dikhao|mera order dikhao|view cart/.test(lower)) return false;
   return /mera order|meri order|order kahan|kahan pohanch|track order|order status|order kaha/.test(lower);
 }
 
@@ -2257,13 +2360,15 @@ function isCatalogAsk(lower: string) {
     .replace(/\s+/g, " ")
     .trim();
   if (
-    /kya kya|menu\b|catalog|available|rate list|price list|pricelist|stock list|categor/.test(t)
+    /kya kya|menu\b|catalog|available|rate list|price list|pricelist|stock list|categor|\blist\b/.test(
+      t
+    )
   ) {
     return true;
   }
-  const mentionsGoods = /product|products|item|items|saman|stock|catalog|menu/.test(t);
+  const mentionsGoods = /product|products|item|items|saman|stock|catalog|menu|\blist\b/.test(t);
   const asks =
-    /kn kn|kaun kaun|kons[aeiy]|konse|konsi|kya|hai|hain|dikhao|dikha|batao|bata|bhejo|bhej|send|list|detail|details|do\b/.test(
+    /kn kn|kaun kaun|kons[aeiy]|konse|konsi|kya|hai|hain|dikhao|dikha|batao|bata|bhejo|bhej|bhj|send|list|detail|details|do\b/.test(
       t
     );
   return mentionsGoods && asks;
@@ -2314,6 +2419,9 @@ function nextMissingField(
         prompt: `${missingSize.name} ka size (${sizes.join(", ")})`,
       };
     }
+  }
+  if (isCartBuilding(order) && !["naam", "address", "payment", "revise"].includes(String(order.notes || ""))) {
+    return null;
   }
   if (!order.customer_name) return { key: "naam", prompt: "poora naam (sirf naam, address nahi)" };
   if (!order.address) return { key: "address", prompt: "delivery address" };
@@ -2554,6 +2662,12 @@ function mergeOrder(
     payment_method: (pending?.payment_method as ParsedOrderData["payment_method"]) || null,
     payment_status: (pending?.payment_status as ParsedOrderData["payment_status"]) || null,
     notes: (pending?.notes as string) || null,
+    session_phase: (pending?.session_phase as string) || null,
+    pending_product_id: (pending?.pending_product_id as string) || null,
+    pending_action: (pending?.pending_action as string) || null,
+    catalog_index: Array.isArray(pending?.catalog_index)
+      ? (pending?.catalog_index as ParsedOrderData["catalog_index"])
+      : [],
   };
   if (!extracted) return matchCatalog(base, products);
   const mergedProducts = extracted.products.length
@@ -2604,6 +2718,10 @@ function mergeOrder(
       payment_method: extracted.payment_method || base.payment_method,
       payment_status: extracted.payment_status || base.payment_status,
       notes: extracted.notes || base.notes,
+      session_phase: extracted.session_phase || base.session_phase,
+      pending_product_id: extracted.pending_product_id ?? base.pending_product_id,
+      pending_action: extracted.pending_action ?? base.pending_action,
+      catalog_index: extracted.catalog_index?.length ? extracted.catalog_index : base.catalog_index,
     },
     products
   );
@@ -2620,7 +2738,7 @@ function applyCartEdit(
   replyUr: string;
 } | null {
   const t = message.toLowerCase().trim();
-  const cartShow = /cart dikhao|view cart|cart dikha|cart batao/.test(t);
+  const cartShow = /cart dikhao|view cart|cart dikha|cart batao|mera order dikhao/.test(t);
   const cartClear = /clear cart|cart clear|cart khali|sab hata do|sari items hata/.test(t);
   if (!pending.products.length && !cartShow && !cartClear) return null;
   if (isConfirmYes(message) || isCancelRequest(message)) return null;

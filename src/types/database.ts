@@ -175,6 +175,10 @@ export interface ParsedOrderData {
   payment_method: PaymentMethod | null;
   payment_status: PaymentStatus | null;
   notes: string | null;
+  session_phase?: string | null;
+  pending_product_id?: string | null;
+  pending_action?: string | null;
+  catalog_index?: Array<{ n: number; id: string; name: string }>;
 }
 
 export type AgentAction =

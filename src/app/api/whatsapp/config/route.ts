@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionUserId } from "@/lib/auth/session";
+import { encryptSecret, maskSecret } from "@/lib/crypto/secrets";
 import { readDb, uid, writeDb, type LocalWhatsAppConfig } from "@/lib/db/store";
 
 async function businessIdForUser() {
@@ -21,6 +22,10 @@ function publicConfig(config: LocalWhatsAppConfig) {
     agent_greeting: config.agent_greeting || "",
     has_token: Boolean(config.access_token),
     has_groq_key: Boolean(config.groq_api_key),
+    groq_key_masked: maskSecret(config.groq_api_key),
+    display_phone_number: config.display_phone_number || "",
+    verified_name: config.verified_name || "",
+    connection_status: config.connection_status || (config.access_token && config.phone_number_id ? "connected" : "disconnected"),
     easypaisa_number: config.easypaisa_number || "",
     jazzcash_number: config.jazzcash_number || "",
   };
@@ -81,10 +86,18 @@ export async function PATCH(request: NextRequest) {
     "easypaisa_number",
     "jazzcash_number",
     "auto_confirm_orders",
+    "groq_model",
+    "groq_temperature",
+    "groq_max_tokens",
+    "agent_language",
   ] as const;
   for (const key of allowed) {
     if (key in updates) {
-      (live as unknown as Record<string, unknown>)[key] = updates[key];
+      let value = updates[key];
+      if ((key === "access_token" || key === "groq_api_key") && typeof value === "string" && value.trim()) {
+        value = encryptSecret(value.trim());
+      }
+      (live as unknown as Record<string, unknown>)[key] = value;
     }
   }
   live.verify_token = process.env.WHATSAPP_VERIFY_TOKEN || live.verify_token;

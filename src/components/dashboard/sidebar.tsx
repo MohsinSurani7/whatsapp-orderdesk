@@ -23,6 +23,7 @@ const navItems = [
   { href: "/customers", label: "Customers", icon: Users, badgeKey: null },
   { href: "/products", label: "Products", icon: Package, badgeKey: null },
   { href: "/whatsapp", label: "WhatsApp Agent", icon: Bot, badgeKey: null },
+  { href: "/ai", label: "AI Control", icon: Bot, badgeKey: null },
   { href: "/whatsapp/conversations", label: "Conversations", icon: MessageCircle, badgeKey: "chats" as const },
   { href: "/settings", label: "Settings", icon: Settings, badgeKey: null },
 ];

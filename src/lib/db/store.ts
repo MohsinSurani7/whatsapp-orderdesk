@@ -139,6 +139,15 @@ export interface LocalWhatsAppConfig {
   agent_greeting: string;
   agent_instructions: string | null;
   groq_api_key: string | null;
+  groq_model?: string | null;
+  groq_temperature?: number | null;
+  groq_max_tokens?: number | null;
+  agent_language?: string | null;
+  display_phone_number?: string | null;
+  verified_name?: string | null;
+  connection_status?: string | null;
+  last_webhook_at?: string | null;
+  last_inbound_at?: string | null;
   easypaisa_number: string | null;
   jazzcash_number: string | null;
   auto_confirm_orders: boolean;
@@ -210,6 +219,40 @@ export interface DatabaseShape {
   notifications: LocalNotification[];
   inventory_transactions?: LocalInventoryTransaction[];
   idempotency_keys?: LocalIdempotencyKey[];
+  ai_instructions?: LocalAiInstruction[];
+  ai_logs?: LocalAiLog[];
+  delivery_settings?: LocalDeliverySettings[];
+}
+
+export interface LocalDeliverySettings {
+  id: string;
+  business_id: string;
+  enabled: boolean;
+  delivery_fee: number;
+  free_delivery_above: number | null;
+  delivery_areas: string | null;
+  estimated_delivery_time: string | null;
+  delivery_policy: string | null;
+}
+
+export interface LocalAiInstruction {
+  id: string;
+  business_id: string;
+  instruction: string;
+  active: boolean;
+  priority: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LocalAiLog {
+  id: string;
+  business_id: string;
+  kind: string;
+  model: string | null;
+  latency_ms: number | null;
+  error: string | null;
+  created_at: string;
 }
 
 const emptyDb = (): DatabaseShape => ({
@@ -228,6 +271,9 @@ const emptyDb = (): DatabaseShape => ({
   notifications: [],
   inventory_transactions: [],
   idempotency_keys: [],
+  ai_instructions: [],
+  ai_logs: [],
+  delivery_settings: [],
 });
 
 function dbPath() {
@@ -271,6 +317,8 @@ export async function withDbLock<T>(fn: (db: DatabaseShape) => Promise<T> | T): 
     const db = await readDb();
     if (!db.inventory_transactions) db.inventory_transactions = [];
     if (!db.idempotency_keys) db.idempotency_keys = [];
+    if (!db.ai_instructions) db.ai_instructions = [];
+    if (!db.delivery_settings) db.delivery_settings = [];
     const result = await fn(db);
     await writeDb(db);
     return result;

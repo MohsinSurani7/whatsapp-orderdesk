@@ -192,7 +192,12 @@ async function run() {
     ["catalog pick ignores old address", !/ghazi ghat/i.test(String(pickNine.parsed_order?.address || ""))],
     ["identity keeps draft name", identityAsk.parsed_order?.customer_name === "Baloch"],
     ["identity does not ask payment", /whatsapp assistant/i.test(identityAsk.reply) && !/payment method|easypaisa/i.test(identityAsk.reply)],
-    ["catalog 9 is item 9 not 6", pickRealNine.parsed_order?.products?.[0]?.name === "Item Nine"],
+    [
+      "catalog 9 is item 9 not 6",
+      /Item Nine/i.test(pickRealNine.reply) &&
+        pickRealNine.parsed_order?.pending_product_id === "n9" &&
+        !/Item Six/i.test(pickRealNine.reply),
+    ],
     ["invalid catalog 99", /current catalog/i.test(pickInvalid.reply) && !pickInvalid.should_create_order],
     ["photo number does not checkout", photoSix.intent === "product_inquiry" && !photoSix.should_create_order && !/quantity kitni|how many pieces/i.test(photoSix.reply)],
     ["photo number no old name", photoSix.parsed_order?.customer_name !== "Baloch"],

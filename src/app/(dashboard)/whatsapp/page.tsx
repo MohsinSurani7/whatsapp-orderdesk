@@ -8,6 +8,132 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Bot, CheckCircle, Copy, ExternalLink } from "lucide-react";
 
+function ConnectWhatsApp({
+  config,
+  onRefresh,
+}: {
+  config: Record<string, unknown> | null;
+  onRefresh: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const connected = Boolean(config?.has_token && config?.phone_number_id);
+
+  async function connect() {
+    setError("");
+    setBusy(true);
+    const meta = await fetch("/api/whatsapp/embedded-signup").then((r) => r.json());
+    if (!meta.configured) {
+      setBusy(false);
+      setError("Server pe META_APP_ID, META_APP_SECRET, META_EMBEDDED_SIGNUP_CONFIG_ID set karein.");
+      return;
+    }
+    await new Promise<void>((resolve, reject) => {
+      const existing = document.getElementById("facebook-jssdk");
+      if (existing && (window as unknown as { FB?: { login: Function } }).FB) return resolve();
+      (window as unknown as { fbAsyncInit?: () => void }).fbAsyncInit = () => {
+        (window as unknown as { FB: { init: (o: object) => void } }).FB.init({
+          appId: meta.appId,
+          cookie: true,
+          xfbml: true,
+          version: meta.graphVersion || "v21.0",
+        });
+        resolve();
+      };
+      if (!existing) {
+        const s = document.createElement("script");
+        s.id = "facebook-jssdk";
+        s.src = "https://connect.facebook.net/en_US/sdk.js";
+        s.onerror = () => reject(new Error("Facebook SDK load failed"));
+        document.body.appendChild(s);
+      }
+    }).catch((e) => {
+      setError(String(e.message || e));
+      setBusy(false);
+    });
+    const FB = (window as unknown as { FB?: { login: (cb: (r: { authResponse?: { code?: string } }) => void, opts: object) => void } }).FB;
+    if (!FB) {
+      setBusy(false);
+      return;
+    }
+    FB.login(
+      (res) => {
+        const code = res.authResponse?.code;
+        if (!code) {
+          setError("Signup window band ho gayi — connection active mark nahi hua.");
+          setBusy(false);
+          return;
+        }
+        fetch("/api/whatsapp/embedded-signup", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ code }),
+        })
+          .then((r) => r.json())
+          .then((d) => {
+            if (d.error) setError(d.error);
+            onRefresh();
+            setBusy(false);
+          })
+          .catch(() => {
+            setError("Backend exchange failed");
+            setBusy(false);
+          });
+      },
+      {
+        config_id: meta.configId,
+        response_type: "code",
+        override_default_response_type: true,
+      }
+    );
+  }
+
+  async function disconnect() {
+    if (!window.confirm("Is business ka WhatsApp disconnect karein? Products/orders delete nahi honge.")) return;
+    await fetch("/api/whatsapp/disconnect", { method: "POST" });
+    onRefresh();
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Connect WhatsApp</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3 text-sm">
+        <p>
+          Status:{" "}
+          {connected ? (
+            <span className="font-semibold text-green-700">🟢 Connected</span>
+          ) : (
+            <span className="font-semibold text-red-700">🔴 Not Connected</span>
+          )}
+        </p>
+        {connected && (
+          <div className="space-y-1 text-gray-700">
+            <p>Display: {String(config?.verified_name || config?.display_phone_number || "—")}</p>
+            <p>Phone number ID: {String(config?.phone_number_id || "")}</p>
+            <p>WABA ID: {String(config?.waba_id || "")}</p>
+            <p>AI Agent: {config?.agent_enabled ? "Active" : "Disabled"}</p>
+          </div>
+        )}
+        {!connected ? (
+          <Button onClick={connect} disabled={busy}>
+            Connect WhatsApp
+          </Button>
+        ) : (
+          <Button variant="destructive" onClick={disconnect}>
+            Disconnect WhatsApp
+          </Button>
+        )}
+        {error && <p className="text-red-700">{error}</p>}
+        <p className="text-xs text-gray-500">
+          Token kabhi UI mein nahi dikhaya jata. Embedded Signup ke baad backend Meta se phone verify karta hai.
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function WhatsAppAgentPage() {
   const [config, setConfig] = useState<Record<string, unknown> | null>(null);
   const [saving, setSaving] = useState(false);
@@ -74,6 +200,10 @@ export default function WhatsAppAgentPage() {
           <CardContent className="p-4 text-sm text-green-800">{health.message}</CardContent>
         </Card>
       )}
+      <ConnectWhatsApp config={config} onRefresh={() => {
+        fetch("/api/whatsapp/config").then((r) => r.json()).then((d) => setConfig(d.config || {}));
+        fetch("/api/whatsapp/health").then((r) => r.json()).then((d) => setHealth(d));
+      }} />
       <Card className="border-green-200">
         <CardHeader>
           <div className="flex items-center gap-3">

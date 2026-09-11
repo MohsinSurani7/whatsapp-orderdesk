@@ -1,8 +1,11 @@
+import { decryptSecret } from "@/lib/crypto/secrets";
+
 export function resolveWhatsAppAuth(config?: {
   access_token?: string | null;
   phone_number_id?: string | null;
 } | null) {
-  const accessToken = (config?.access_token || "").trim();
+  const raw = (config?.access_token || "").trim();
+  const accessToken = (decryptSecret(raw) || raw).trim();
   const phoneNumberId = (config?.phone_number_id || "").trim();
   return { accessToken, phoneNumberId };
 }

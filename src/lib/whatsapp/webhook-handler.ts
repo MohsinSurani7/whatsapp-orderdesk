@@ -3,6 +3,8 @@ import { transcribeWhatsAppAudio } from "@/lib/ai/transcribe";
 import { isRateLimited, withConversationLock } from "@/lib/commerce/locks";
 import { createWhatsAppOrder } from "@/lib/commerce/orders";
 import { normalizePhone } from "@/lib/commerce/phone";
+import { decryptSecret } from "@/lib/crypto/secrets";
+import { slog } from "@/lib/observability/log";
 import {
   sendWhatsAppText,
   sendWhatsAppImage,
@@ -77,6 +79,7 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
         if (inflightInbound.has(msg.id)) continue;
         inflightInbound.add(msg.id);
         try {
+        slog("WEBHOOK", "Incoming message", { business_id: business.id, type: msg.type, from: msg.from });
         if (isRateLimited(`wa:${metadata.phone_number_id}:${msg.from}`)) {
           console.error("WhatsApp inbound rate limited", msg.from);
           continue;
@@ -84,7 +87,7 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
         const inbound = await resolveInboundText(
           msg,
           auth.accessToken,
-          config.groq_api_key || process.env.GROQ_API_KEY || null
+          decryptSecret(config.groq_api_key) || config.groq_api_key || process.env.GROQ_API_KEY || null
         );
         if (!inbound) continue;
         const textBody = inbound.text;
@@ -253,7 +256,14 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
           customerName: locked.customer_name,
           instructions: config.agent_instructions || config.agent_greeting,
           referredProduct,
-          groqApiKey: config.groq_api_key,
+          groqApiKey: decryptSecret(config.groq_api_key) || config.groq_api_key,
+          groqModel: config.groq_model || process.env.GROQ_MODEL || null,
+          groqTemperature: config.groq_temperature ?? 0.35,
+          groqMaxTokens: config.groq_max_tokens ?? 1200,
+          deliveryPolicy:
+            config.agent_instructions && /delivery/i.test(config.agent_instructions)
+              ? config.agent_instructions
+              : "Delivery Pakistan-wide available hai. Fee shop policy ke mutabiq hai. Sirf delivery poochne se koi product select nahi hota.",
           easypaisaNumber: config.easypaisa_number,
           jazzcashNumber: config.jazzcash_number,
           selectedCategory: inbound.category,
@@ -283,7 +293,7 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
           agentResponse = {
             intent: "general",
             reply:
-              "Maaf kijiye, reply ruk gaya tha. Aap ka last message save hai — ek line mein dobara likh dein, main continue karta hoon.",
+              "Maazrat, abhi thori technical problem aa rahi hai. Please thori dair baad dobara message karein.",
             parsed_order: locked.pending_order_data as AgentResponse["parsed_order"],
             should_create_order: false,
             order_id: null,
@@ -317,7 +327,13 @@ export async function handleWhatsAppWebhook(body: { entry?: WebhookEntry[] }) {
           const live = latest.conversations.find((c) => c.id === locked.id);
           if (live) {
             const po = agentResponse.parsed_order;
-            const empty = !po.products?.length && !po.customer_name && !po.address && !po.payment_method;
+            const empty =
+              !po.products?.length &&
+              !po.customer_name &&
+              !po.address &&
+              !po.payment_method &&
+              !po.pending_product_id &&
+              !(po.catalog_index && po.catalog_index.length);
             live.pending_order_data = empty ? null : (po as unknown as Record<string, unknown>);
             live.status = agentResponse.needs_human ? "handed_off" : empty ? "active" : "awaiting_confirmation";
             live.last_message_at = nowIso();
